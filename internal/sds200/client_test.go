@@ -281,6 +281,28 @@ func TestClientResync(t *testing.T) {
 	assert.Equal(t, "Fire Ops", status.Channel)
 }
 
+func TestCommandMatchesResponse(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		expected string
+		got      string
+		want     bool
+	}{
+		{name: "exact_match", expected: "MDL", got: "MDL", want: true},
+		{name: "gwf_binary_variant", expected: "GWF", got: "GW2", want: true},
+		{name: "different_commands", expected: "MDL", got: "VER", want: false},
+		{name: "gw2_not_gwf", expected: "GW2", got: "GWF", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, commandMatchesResponse(tt.expected, tt.got))
+		})
+	}
+}
+
 func TestClientClose(t *testing.T) {
 	t.Parallel()
 

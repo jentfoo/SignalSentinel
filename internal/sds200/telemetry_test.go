@@ -54,36 +54,74 @@ func TestParseSTS(t *testing.T) {
 func TestParseGST(t *testing.T) {
 	t.Parallel()
 
-	fields := []string{
-		"00000",
-		"l1", "m1",
-		"l2", "m2",
-		"l3", "m3",
-		"l4", "m4",
-		"l5", "m5",
-		"Mute", "1", "0",
-		"1", "460.1000", "NFM", "0",
-		"460.1000", "459.0000", "461.0000", "0", "3",
-	}
+	t.Run("valid_fields", func(t *testing.T) {
+		fields := []string{
+			"00000",
+			"l1", "m1",
+			"l2", "m2",
+			"l3", "m3",
+			"l4", "m4",
+			"l5", "m5",
+			"Mute", "1", "0",
+			"1", "460.1000", "NFM", "0",
+			"460.1000", "459.0000", "461.0000", "0", "3",
+		}
+		got, err := ParseGST(fields)
+		require.NoError(t, err)
+		assert.Equal(t, "Mute", got.Mute)
+		assert.Equal(t, "460.1000", got.Frequency)
+		assert.Equal(t, "NFM", got.Mod)
+		assert.Equal(t, "460.1000", got.Center)
+		assert.Equal(t, "459.0000", got.Lower)
+		assert.Equal(t, "461.0000", got.Upper)
+		assert.Equal(t, "3", got.FFTSize)
+		assert.Equal(t, "1", got.LED1)
+		assert.Equal(t, "0", got.LED2)
+	})
 
-	got, err := ParseGST(fields)
-	require.NoError(t, err)
-	assert.Equal(t, "Mute", got.Mute)
-	assert.Equal(t, "460.1000", got.Frequency)
-	assert.Equal(t, "3", got.FFTSize)
+	t.Run("insufficient_fields", func(t *testing.T) {
+		fields := []string{
+			"00000",
+			"l1", "m1",
+			"l2", "m2",
+			"l3", "m3",
+			"l4", "m4",
+			"l5", "m5",
+		}
+		_, err := ParseGST(fields)
+		require.Error(t, err)
+	})
 }
 
 func TestParseScannerInfoXML(t *testing.T) {
 	t.Parallel()
 
-	raw := []byte(`<?xml version="1.0" encoding="utf-8"?><ScannerInfo Mode="Scan Mode" V_Screen="conventional_scan"><Property VOL="10" SQL="4" Sig="2" Mute="Unmute"/><System Name="Public Safety"/><Department Name="Dispatch"/><ConvFrequency Name="Primary" Freq="460.1000MHz" Hold="On"/></ScannerInfo>`)
-	info, err := ParseScannerInfoXML(raw)
-	require.NoError(t, err)
-	assert.Equal(t, "Scan Mode", info.Mode)
-	assert.Equal(t, "conventional_scan", info.VScreen)
-	assert.Equal(t, "10", info.Property["VOL"])
-	require.Len(t, info.Nodes["System"], 1)
-	assert.Equal(t, "Public Safety", info.Nodes["System"][0]["Name"])
+	t.Run("conventional_frequency", func(t *testing.T) {
+		raw := []byte(`<?xml version="1.0" encoding="utf-8"?><ScannerInfo Mode="Scan Mode" V_Screen="conventional_scan"><Property VOL="10" SQL="4" Sig="2" Mute="Unmute"/><System Name="Public Safety"/><Department Name="Dispatch"/><ConvFrequency Name="Primary" Freq="460.1000MHz" Hold="On"/></ScannerInfo>`)
+		info, err := ParseScannerInfoXML(raw)
+		require.NoError(t, err)
+		assert.Equal(t, "Scan Mode", info.Mode)
+		assert.Equal(t, "conventional_scan", info.VScreen)
+		assert.Equal(t, "10", info.Property["VOL"])
+		require.Len(t, info.Nodes["System"], 1)
+		assert.Equal(t, "Public Safety", info.Nodes["System"][0]["Name"])
+	})
+
+	t.Run("trunked_tgid", func(t *testing.T) {
+		raw := []byte(`<?xml version="1.0" encoding="utf-8"?><ScannerInfo Mode="Scan Mode" V_Screen="trunk_scan"><Property VOL="12" SQL="3" Sig="5" Mute="Unmute"/><System Name="County P25"/><Department Name="Law Enforcement"/><TGID Name="Dispatch 1" TGID="100" Hold="On"/></ScannerInfo>`)
+		info, err := ParseScannerInfoXML(raw)
+		require.NoError(t, err)
+		assert.Equal(t, "trunk_scan", info.VScreen)
+		require.Len(t, info.Nodes["TGID"], 1)
+		assert.Equal(t, "Dispatch 1", info.Nodes["TGID"][0]["Name"])
+		assert.Equal(t, "100", info.Nodes["TGID"][0]["TGID"])
+	})
+
+	t.Run("wrong_root_element", func(t *testing.T) {
+		raw := []byte(`<?xml version="1.0" encoding="utf-8"?><GLT><FL Index="0"/></GLT>`)
+		_, err := ParseScannerInfoXML(raw)
+		require.Error(t, err)
+	})
 }
 
 func TestTelemetryStoreSnapshot(t *testing.T) {
@@ -165,6 +203,35 @@ func TestTelemetryStoreUpdateFromScannerInfo(t *testing.T) {
 	assert.True(t, updated.SquelchOpen)
 }
 
+func TestTelemetryStoreUpdateFromScannerInfoTGID(t *testing.T) {
+	t.Parallel()
+
+	store := NewTelemetryStore()
+	info := ScannerInfo{
+		Mode:    "Scan Mode",
+		VScreen: "trunk_scan",
+		Property: map[string]string{
+			"VOL":  "15",
+			"SQL":  "3",
+			"Sig":  "5",
+			"Mute": "Unmute",
+		},
+		Nodes: map[string][]map[string]string{
+			"System":     {{"Name": "County P25"}},
+			"Department": {{"Name": "Law Enforcement"}},
+			"TGID":       {{"Name": "Dispatch 1", "TGID": "100", "Hold": "On"}},
+		},
+	}
+	updated := store.UpdateFromScannerInfo(info)
+	assert.True(t, updated.Connected)
+	assert.Equal(t, "County P25", updated.System)
+	assert.Equal(t, "Law Enforcement", updated.Department)
+	assert.Equal(t, "Dispatch 1", updated.Channel)
+	assert.True(t, updated.Hold)
+	assert.Equal(t, 15, updated.Volume)
+	assert.Equal(t, 5, updated.Signal)
+}
+
 func TestTelemetryStoreUpdateFromScannerInfoHoldOff(t *testing.T) {
 	t.Parallel()
 
@@ -215,6 +282,8 @@ func TestParseGCSResponse(t *testing.T) {
 			assert.Equal(t, 4, got.Status)
 			assert.Equal(t, 4184, got.VoltageMV)
 			assert.Equal(t, 100, got.CapacityPct)
+			assert.Equal(t, 0, got.CurrentMA)
+			assert.InDelta(t, 27.65, got.TempC, 0.001)
 		})
 	}
 }

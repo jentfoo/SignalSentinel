@@ -36,6 +36,115 @@ func quickKeysPayload(prefix ...string) string {
 	return strings.Join(fields, ",")
 }
 
+func TestCommandResponseIsOK(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		fields []string
+		want   bool
+	}{
+		{name: "ok_uppercase", fields: []string{"OK"}, want: true},
+		{name: "ok_lowercase", fields: []string{"ok"}, want: true},
+		{name: "ok_with_whitespace", fields: []string{" OK "}, want: true},
+		{name: "ng_response", fields: []string{"NG"}, want: false},
+		{name: "empty_fields", fields: nil, want: false},
+		{name: "data_response", fields: []string{"SDS200"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := CommandResponse{Command: "TEST", Fields: tt.fields}
+			assert.Equal(t, tt.want, resp.IsOK())
+		})
+	}
+}
+
+func TestCommandResponseIsNG(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		fields []string
+		want   bool
+	}{
+		{name: "ng_response", fields: []string{"NG"}, want: true},
+		{name: "err_response", fields: []string{"ERR"}, want: true},
+		{name: "ng_with_whitespace", fields: []string{" ng "}, want: true},
+		{name: "ok_response", fields: []string{"OK"}, want: false},
+		{name: "empty_fields", fields: nil, want: false},
+		{name: "data_response", fields: []string{"SDS200"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := CommandResponse{Command: "TEST", Fields: tt.fields}
+			assert.Equal(t, tt.want, resp.IsNG())
+		})
+	}
+}
+
+func TestRequireOK(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		resp    CommandResponse
+		wantErr bool
+	}{
+		{name: "ok_response", resp: CommandResponse{Command: "VOL", Fields: []string{"OK"}}, wantErr: false},
+		{name: "ng_response", resp: CommandResponse{Command: "VOL", Fields: []string{"NG"}}, wantErr: true},
+		{name: "err_response", resp: CommandResponse{Command: "URC", Fields: []string{"ERR", "0001"}}, wantErr: true},
+		{name: "empty_fields", resp: CommandResponse{Command: "VOL", Fields: nil}, wantErr: true},
+		{name: "unexpected_data", resp: CommandResponse{Command: "VOL", Fields: []string{"12"}}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := requireOK(tt.resp)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestParseQuickKeys(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid_keys", func(t *testing.T) {
+		fields := make([]string, 100)
+		for i := range fields {
+			fields[i] = strconv.Itoa(i % 3)
+		}
+		state, err := parseQuickKeys(fields, 0)
+		require.NoError(t, err)
+		assert.Equal(t, 0, state[0])
+		assert.Equal(t, 1, state[1])
+		assert.Equal(t, 2, state[2])
+	})
+
+	t.Run("too_short", func(t *testing.T) {
+		_, err := parseQuickKeys([]string{"0", "1"}, 0)
+		require.Error(t, err)
+	})
+
+	t.Run("with_offset", func(t *testing.T) {
+		fields := make([]string, 102)
+		fields[0] = "99"
+		fields[1] = "88"
+		for i := 2; i < 102; i++ {
+			fields[i] = strconv.Itoa(i - 2)
+		}
+		state, err := parseQuickKeys(fields, 2)
+		require.NoError(t, err)
+		assert.Equal(t, 0, state[0])
+		assert.Equal(t, 1, state[1])
+	})
+}
+
 func TestExecute(t *testing.T) {
 	t.Parallel()
 
@@ -346,15 +455,23 @@ func TestGetServiceTypes(t *testing.T) {
 func TestSetServiceTypes(t *testing.T) {
 	t.Parallel()
 
-	client, _ := newCommandTestClient(t, func(req string) []string {
-		if readRequestCommand(req) == cmdSVC {
-			return []string{"SVC,OK\r"}
-		}
-		return nil
+	t.Run("valid_length", func(t *testing.T) {
+		client, _ := newCommandTestClient(t, func(req string) []string {
+			if readRequestCommand(req) == cmdSVC {
+				return []string{"SVC,OK\r"}
+			}
+			return nil
+		})
+		values := make([]int, 47)
+		require.NoError(t, client.SetServiceTypes(values))
 	})
 
-	values := make([]int, 47)
-	require.NoError(t, client.SetServiceTypes(values))
+	t.Run("wrong_length", func(t *testing.T) {
+		client, _ := newCommandTestClient(t, func(req string) []string {
+			return nil
+		})
+		require.Error(t, client.SetServiceTypes(make([]int, 10)))
+	})
 }
 
 func TestJumpMode(t *testing.T) {

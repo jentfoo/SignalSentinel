@@ -1,6 +1,7 @@
 package sds200
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -82,6 +83,16 @@ func TestParseXMLFragment(t *testing.T) {
 			raw:     `GSI,<XML>,<?xml version="1.0" encoding="utf-8"?><ScannerInfo></ScannerInfo>` + "\r",
 			wantErr: true,
 		},
+		{
+			name:    "empty_input",
+			raw:     "",
+			wantErr: true,
+		},
+		{
+			name:    "not_xml_response",
+			raw:     "MDL,SDS200\r",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -121,6 +132,39 @@ func TestXMLReassembler(t *testing.T) {
 		assert.Equal(t, []int{2}, x.MissingSequences())
 		assert.Nil(t, x.Bytes())
 	})
+
+	t.Run("out_of_order", func(t *testing.T) {
+		x := newXMLReassembler()
+		x.Add(&xmlFragment{RootOpenTag: "<GLT>", RootName: "GLT", Body: `<FL Index="1"/>`, Seq: 2, EOT: true})
+		assert.False(t, x.Complete())
+		assert.Equal(t, []int{1}, x.MissingSequences())
+
+		x.Add(&xmlFragment{RootOpenTag: "<GLT>", RootName: "GLT", Body: `<FL Index="0"/>`, Seq: 1, EOT: false})
+		assert.True(t, x.Complete())
+
+		result := string(x.Bytes())
+		idx0 := strings.Index(result, `<FL Index="0"/>`)
+		idx1 := strings.Index(result, `<FL Index="1"/>`)
+		assert.Greater(t, idx1, idx0, "bodies should be ordered by sequence number")
+	})
+
+	t.Run("single_fragment", func(t *testing.T) {
+		x := newXMLReassembler()
+		x.Add(&xmlFragment{RootOpenTag: `<GLT Type="FL">`, RootName: "GLT", Body: `<FL Index="0"/>`, Seq: 1, EOT: true})
+		assert.True(t, x.Complete())
+		assert.Empty(t, x.MissingSequences())
+
+		result := string(x.Bytes())
+		assert.Contains(t, result, `<GLT Type="FL">`)
+		assert.Contains(t, result, `</GLT>`)
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		x := newXMLReassembler()
+		assert.False(t, x.Complete())
+		assert.Nil(t, x.Bytes())
+		assert.Nil(t, x.MissingSequences())
+	})
 }
 
 func TestParseXMLNode(t *testing.T) {
@@ -135,6 +179,33 @@ func TestParseXMLNode(t *testing.T) {
 	child, ok := nodeFirstChildByName(node, "Property")
 	require.True(t, ok)
 	assert.Equal(t, "10", child.Attrs["VOL"])
+}
+
+func TestNodeFirstChildByName(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`<?xml version="1.0" encoding="utf-8"?><Root><Child Name="A"/></Root>`)
+	node, err := parseXMLNode(raw)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name  string
+		local string
+		found bool
+	}{
+		{name: "existing_child", local: "Child", found: true},
+		{name: "missing_child", local: "Missing", found: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			child, ok := nodeFirstChildByName(node, tt.local)
+			assert.Equal(t, tt.found, ok)
+			if tt.found {
+				assert.Equal(t, tt.local, child.XMLName.Local)
+			}
+		})
+	}
 }
 
 func TestParseIntDefault(t *testing.T) {

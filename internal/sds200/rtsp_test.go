@@ -101,6 +101,63 @@ func startRTSPMockServer(t *testing.T) (host string, port int) {
 	return addr.IP.String(), addr.Port
 }
 
+func TestRTSPConfigURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  RTSPConfig
+		want string
+	}{
+		{
+			name: "defaults_applied",
+			cfg:  RTSPConfig{Address: "192.168.1.50"},
+			want: "rtsp://192.168.1.50:554/au:scanner.au",
+		},
+		{
+			name: "custom_port_and_path",
+			cfg:  RTSPConfig{Address: "10.0.0.1", Port: 8554, Path: "audio.wav"},
+			want: "rtsp://10.0.0.1:8554/audio.wav",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.cfg.URL())
+		})
+	}
+}
+
+func TestRTSPConfigTrackURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		trackID int
+		want    string
+	}{
+		{name: "track_id_1", trackID: 1, want: "rtsp://192.168.1.50:554/au:scanner.au/trackID=1"},
+		{name: "track_id_zero_defaults", trackID: 0, want: "rtsp://192.168.1.50:554/au:scanner.au/trackID=1"},
+		{name: "track_id_2", trackID: 2, want: "rtsp://192.168.1.50:554/au:scanner.au/trackID=2"},
+	}
+
+	cfg := RTSPConfig{Address: "192.168.1.50"}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, cfg.TrackURL(tt.trackID))
+		})
+	}
+}
+
+func TestNewRTSPClient(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing_address", func(t *testing.T) {
+		_, err := NewRTSPClient(RTSPConfig{})
+		require.Error(t, err)
+	})
+}
+
 func TestRTSPClientOptions(t *testing.T) {
 	t.Parallel()
 

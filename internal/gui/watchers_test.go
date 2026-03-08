@@ -14,8 +14,6 @@ import (
 )
 
 func TestApplyState(t *testing.T) {
-	t.Parallel()
-
 	t.Run("disconnected_disables_controls", func(t *testing.T) {
 		model := &uiModel{selectedClip: -1}
 		ui := newTestUIViews(model)
@@ -106,8 +104,6 @@ func TestApplyState(t *testing.T) {
 }
 
 func TestApplyRecordingsLoadResult(t *testing.T) {
-	t.Parallel()
-
 	t.Run("records_loader_error", func(t *testing.T) {
 		model := &uiModel{selectedClip: -1}
 		ui := newTestUIViews(model)

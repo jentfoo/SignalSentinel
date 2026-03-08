@@ -17,6 +17,8 @@ type testWriter struct {
 	samples     int
 	finalized   bool
 	aborted     bool
+	finalizeOps int
+	abortOps    int
 	finalizeLen int64
 	writeErr    error
 	finalizeErr error
@@ -35,6 +37,7 @@ func (w *testWriter) WritePCM(samples []int16) error {
 }
 
 func (w *testWriter) Finalize() (int64, error) {
+	w.finalizeOps++
 	if w.finalizeErr != nil {
 		return 0, w.finalizeErr
 	}
@@ -43,6 +46,7 @@ func (w *testWriter) Finalize() (int64, error) {
 }
 
 func (w *testWriter) Abort() error {
+	w.abortOps++
 	w.aborted = true
 	return nil
 }
@@ -180,17 +184,45 @@ func TestManagerTick(t *testing.T) {
 func TestManagerClose(t *testing.T) {
 	t.Parallel()
 
-	t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
-	writer := &testWriter{finalizeLen: 8}
-	m := NewManager(Config{
-		OutputDir: filepath.Join(t.TempDir(), "clips"),
-		WriterFactory: func(path string) (PCMWriter, error) {
-			return writer, nil
-		},
+	t.Run("normal_close_finalizes_once_without_abort", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		writer := &testWriter{finalizeLen: 8}
+		m := NewManager(Config{
+			OutputDir: filepath.Join(t.TempDir(), "clips"),
+			WriterFactory: func(path string) (PCMWriter, error) {
+				return writer, nil
+			},
+		})
+		require.NoError(t, m.UpdateTelemetry(activeStatus(), t0))
+		require.NoError(t, m.Close())
+		assert.True(t, writer.finalized)
+		assert.Equal(t, 1, writer.finalizeOps)
+		assert.Equal(t, 0, writer.abortOps)
 	})
-	require.NoError(t, m.UpdateTelemetry(activeStatus(), t0))
-	require.NoError(t, m.Close())
-	assert.True(t, writer.finalized)
+
+	t.Run("faulted_close_returns_same_error_without_finalize", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		writer := &testWriter{
+			writeErr:  errors.New("disk write fault"),
+			failAfter: 1,
+		}
+		m := NewManager(Config{
+			OutputDir: filepath.Join(t.TempDir(), "clips"),
+			WriterFactory: func(path string) (PCMWriter, error) {
+				return writer, nil
+			},
+		})
+		require.NoError(t, m.UpdateTelemetry(activeStatus(), t0))
+
+		err := m.PushPCM([]int16{1, 2, 3}, t0.Add(time.Second))
+		require.Error(t, err)
+
+		closeErr := m.Close()
+		require.Error(t, closeErr)
+		assert.Equal(t, err.Error(), closeErr.Error())
+		assert.Equal(t, 0, writer.finalizeOps)
+		assert.Equal(t, 1, writer.abortOps)
+	})
 }
 
 func TestManagerUpdateOutputDir(t *testing.T) {

@@ -425,3 +425,154 @@ func TestScannerSessionConnectAndSync(t *testing.T) {
 		assert.Equal(t, 1, client.snapshot().closeCalls)
 	})
 }
+
+func TestScannerSessionHealthCheck(t *testing.T) {
+	t.Parallel()
+
+	t.Run("resync_failure_reconnects_with_new_client", func(t *testing.T) {
+		initial := &fakeSDS200Client{
+			resyncErr: errors.New("network interrupt"),
+		}
+		reconnected := &fakeSDS200Client{
+			resyncStatus: sds200.RuntimeStatus{Connected: true, Channel: "Dispatch 2"},
+		}
+
+		factoryCalls := 0
+		session := &ScannerSession{
+			cfg: SessionConfig{
+				Scanner:        store.ScannerConfig{IP: "127.0.0.1"},
+				PushIntervalMS: 750,
+				Factory: func(cfg sds200.ClientConfig) (SDS200Client, error) {
+					factoryCalls++
+					if factoryCalls == 1 {
+						return reconnected, nil
+					}
+					return nil, errors.New("unexpected factory call")
+				},
+			}.withDefaults(),
+			client:   initial,
+			stateHub: newStateHub(),
+		}
+
+		err := session.healthCheck()
+		require.NoError(t, err)
+
+		initialSnap := initial.snapshot()
+		reconnectedSnap := reconnected.snapshot()
+		require.Equal(t, 1, initialSnap.resyncCalls)
+		require.Equal(t, 1, initialSnap.closeCalls)
+		require.Equal(t, 1, factoryCalls)
+		require.Equal(t, 1, reconnectedSnap.resyncCalls)
+		require.Equal(t, []int{750}, reconnectedSnap.startPushCalls)
+		assert.True(t, session.stateHub.snapshot().Scanner.Connected)
+		assert.Equal(t, "Dispatch 2", session.stateHub.snapshot().Scanner.Channel)
+	})
+}
+
+func TestScannerSessionSuperviseFaultInjection(t *testing.T) {
+	t.Parallel()
+
+	t.Run("transient_failure_recovers_without_fatal", func(t *testing.T) {
+		hub := newStateHub()
+		initial := &fakeSDS200Client{
+			resyncStatus: sds200.RuntimeStatus{Connected: true, Channel: "Dispatch 1"},
+		}
+		reconnected := &fakeSDS200Client{
+			resyncStatus: sds200.RuntimeStatus{Connected: true, Channel: "Dispatch 2"},
+		}
+
+		factoryCalls := 0
+		session, err := NewScannerSession(t.Context(), SessionConfig{
+			Scanner:             store.ScannerConfig{IP: "127.0.0.1"},
+			HealthCheckInterval: 5 * time.Millisecond,
+			ReconnectDelay:      time.Millisecond,
+			MaxReconnectFails:   3,
+			PushIntervalMS:      250,
+			Factory: func(cfg sds200.ClientConfig) (SDS200Client, error) {
+				factoryCalls++
+				switch factoryCalls {
+				case 1:
+					return initial, nil
+				case 2:
+					return reconnected, nil
+				default:
+					return reconnected, nil
+				}
+			},
+		}, hub)
+		require.NoError(t, err)
+		defer func() { _ = session.Close() }()
+
+		initial.mu.Lock()
+		initial.resyncErr = errors.New("temporary timeout")
+		initial.mu.Unlock()
+
+		require.Eventually(t, func() bool {
+			return hub.snapshot().Scanner.Channel == "Dispatch 2"
+		}, time.Second, 10*time.Millisecond)
+
+		assertNoFatalWithin(t, session.Fatal(), 100*time.Millisecond)
+	})
+
+	t.Run("reconnect_budget_exhaustion_signals_fatal", func(t *testing.T) {
+		hub := newStateHub()
+		initial := &fakeSDS200Client{
+			resyncStatus: sds200.RuntimeStatus{Connected: true},
+		}
+
+		factoryCalls := 0
+		session, err := NewScannerSession(t.Context(), SessionConfig{
+			Scanner:             store.ScannerConfig{IP: "127.0.0.1"},
+			HealthCheckInterval: 5 * time.Millisecond,
+			ReconnectDelay:      time.Millisecond,
+			MaxReconnectFails:   2,
+			Factory: func(cfg sds200.ClientConfig) (SDS200Client, error) {
+				factoryCalls++
+				if factoryCalls == 1 {
+					return initial, nil
+				}
+				return nil, errors.New("dial failed")
+			},
+		}, hub)
+		require.NoError(t, err)
+		defer func() { _ = session.Close() }()
+
+		initial.mu.Lock()
+		initial.resyncErr = errors.New("socket read failed")
+		initial.mu.Unlock()
+
+		err = requireErrorFromFatal(t, session.Fatal())
+		assert.Contains(t, err.Error(), "scanner reconnect budget exceeded")
+		assert.Contains(t, err.Error(), "dial failed")
+		assert.GreaterOrEqual(t, factoryCalls, 3)
+	})
+}
+
+func requireErrorFromFatal(t *testing.T, fatal <-chan error) error {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for fatal error")
+		return nil
+	case err := <-fatal:
+		require.Error(t, err)
+		return err
+	}
+}
+
+func assertNoFatalWithin(t *testing.T, fatal <-chan error, duration time.Duration) {
+	t.Helper()
+
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
+	select {
+	case err := <-fatal:
+		require.NoError(t, err, "unexpected fatal error received")
+	case <-timer.C:
+	}
+}

@@ -244,6 +244,7 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 	pathEntry := widget.NewEntry()
 	pathEntry.SetText(deps.InitialSettings.RecordingsPath)
 	hangLabel := widget.NewLabel(fmt.Sprintf("%ds", deps.InitialSettings.HangTimeSeconds))
+	currentScannerIP := strings.TrimSpace(deps.InitialSettings.ScannerIP)
 
 	saveSettings := widget.NewButton("Save Settings", nil)
 	saveSettings.OnTapped = func() {
@@ -253,6 +254,7 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 			HangTimeSeconds: deps.InitialSettings.HangTimeSeconds,
 			HangTimeChanged: false, // v1 settings view displays hang-time but does not edit it.
 		}
+		restartRequired := settings.ScannerIP != currentScannerIP
 		saveSettings.Disable()
 		go func() {
 			err := deps.SaveSettings(settings)
@@ -262,7 +264,10 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 					dialog.ShowError(err, window)
 					return
 				}
-				dialog.ShowInformation("Settings", "Settings saved. New recordings use the updated storage path immediately. Restart the app to apply scanner connection changes.", window)
+				currentScannerIP = settings.ScannerIP
+				if restartRequired {
+					dialog.ShowInformation("Settings", "Settings saved. Restart the app to apply scanner connection changes.", window)
+				}
 			})
 		}()
 	}

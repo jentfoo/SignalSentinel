@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testRecordingsPath = "clips"
+
 func TestRuntimeSaveConfig(t *testing.T) {
 	t.Parallel()
 
@@ -44,12 +46,12 @@ func TestRuntimeSaveConfig(t *testing.T) {
 		s := store.New(configPath)
 		runtime := &Runtime{store: s}
 		doc := validDocument()
-		doc.Config.Storage.RecordingsPath = "clips"
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
 		doc.Config.Scanner.IP = "127.0.0.2"
 
 		require.NoError(t, runtime.SaveConfig(doc))
 
-		wantRecordingsPath := filepath.Join(filepath.Dir(configPath), "clips")
+		wantRecordingsPath := filepath.Join(filepath.Dir(configPath), testRecordingsPath)
 		assert.Equal(t, wantRecordingsPath, runtime.RecordingsPath())
 		require.NotNil(t, runtime.Config())
 		assert.Equal(t, "127.0.0.2", runtime.Config().Config.Scanner.IP)
@@ -58,7 +60,7 @@ func TestRuntimeSaveConfig(t *testing.T) {
 		loaded, err := s.Load()
 		require.NoError(t, err)
 		assert.Equal(t, "127.0.0.2", loaded.Config.Scanner.IP)
-		assert.Equal(t, "clips", loaded.Config.Storage.RecordingsPath)
+		assert.Equal(t, testRecordingsPath, loaded.Config.Storage.RecordingsPath)
 	})
 }
 
@@ -101,7 +103,7 @@ func TestRuntimeAppendRecordingPreservedAcrossConfigUpdate(t *testing.T) {
 	s := store.New(configPath)
 	runtime := &Runtime{store: s}
 	doc := validDocument()
-	doc.Config.Storage.RecordingsPath = "clips"
+	doc.Config.Storage.RecordingsPath = testRecordingsPath
 	require.NoError(t, runtime.SaveConfig(doc))
 
 	entry := store.RecordingEntry{
@@ -130,6 +132,70 @@ func TestRuntimeAppendRecordingPreservedAcrossConfigUpdate(t *testing.T) {
 	require.Len(t, loaded.State.Recordings, 1)
 	assert.Equal(t, "rec-42", loaded.State.Recordings[0].ID)
 	assert.Equal(t, "127.0.0.2", loaded.Config.Scanner.IP)
+}
+
+func TestRuntimeDeleteRecordingsByID(t *testing.T) {
+	t.Parallel()
+
+	t.Run("deletes_file_and_metadata", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		s := store.New(configPath)
+		runtime := &Runtime{store: s}
+		doc := validDocument()
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
+		require.NoError(t, runtime.SaveConfig(doc))
+
+		clipPath := filepath.Join(t.TempDir(), "clip-1.flac")
+		require.NoError(t, os.WriteFile(clipPath, []byte("clip"), 0o644))
+		require.NoError(t, runtime.AppendRecording(store.RecordingEntry{
+			ID:       "clip-1",
+			FilePath: clipPath,
+			Trigger:  "manual",
+		}))
+
+		report, err := runtime.DeleteRecordingByID("clip-1")
+		require.NoError(t, err)
+		assert.Equal(t, 1, report.Requested)
+		assert.Equal(t, []string{"clip-1"}, report.Deleted)
+		assert.Empty(t, report.Failed)
+		_, statErr := os.Stat(clipPath)
+		require.ErrorIs(t, statErr, os.ErrNotExist)
+
+		recordings, loadErr := runtime.Recordings()
+		require.NoError(t, loadErr)
+		assert.Empty(t, recordings)
+	})
+
+	t.Run("reports_partial_failures_and_keeps_failed_metadata", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		s := store.New(configPath)
+		runtime := &Runtime{store: s}
+		doc := validDocument()
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
+		require.NoError(t, runtime.SaveConfig(doc))
+
+		badPath := filepath.Join(t.TempDir(), "non-empty-dir")
+		require.NoError(t, os.MkdirAll(badPath, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(badPath, "child"), []byte("x"), 0o644))
+		require.NoError(t, runtime.AppendRecording(store.RecordingEntry{
+			ID:       "bad-delete",
+			FilePath: badPath,
+			Trigger:  "telemetry",
+		}))
+
+		report, err := runtime.DeleteRecordingsByID([]string{"missing", "bad-delete"})
+		require.NoError(t, err)
+		assert.Equal(t, 2, report.Requested)
+		assert.Empty(t, report.Deleted)
+		require.Len(t, report.Failed, 2)
+		assert.Equal(t, "lookup", report.Failed[0].Stage)
+		assert.Equal(t, "file_delete", report.Failed[1].Stage)
+
+		recordings, loadErr := runtime.Recordings()
+		require.NoError(t, loadErr)
+		require.Len(t, recordings, 1)
+		assert.Equal(t, "bad-delete", recordings[0].ID)
+	})
 }
 
 func TestRuntimeEnqueueControl(t *testing.T) {
@@ -169,7 +235,7 @@ func TestResolveRecordingsPath(t *testing.T) {
 	t.Parallel()
 
 	t.Run("keeps_absolute_path", func(t *testing.T) {
-		absolutePath := filepath.Join(t.TempDir(), "clips")
+		absolutePath := filepath.Join(t.TempDir(), testRecordingsPath)
 		doc := validDocument()
 		doc.Config.Storage.RecordingsPath = absolutePath
 
@@ -181,11 +247,11 @@ func TestResolveRecordingsPath(t *testing.T) {
 	t.Run("joins_relative_path", func(t *testing.T) {
 		configPath := filepath.Join(t.TempDir(), "config.yaml")
 		doc := validDocument()
-		doc.Config.Storage.RecordingsPath = "clips"
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
 
 		resolved, err := resolveRecordingsPath(doc, store.New(configPath))
 		require.NoError(t, err)
-		assert.Equal(t, filepath.Join(filepath.Dir(configPath), "clips"), resolved)
+		assert.Equal(t, filepath.Join(filepath.Dir(configPath), testRecordingsPath), resolved)
 	})
 }
 
@@ -193,7 +259,7 @@ func TestEnsureDirectoryWritable(t *testing.T) {
 	t.Parallel()
 
 	t.Run("creates_missing_directory", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "nested", "clips")
+		path := filepath.Join(t.TempDir(), "nested", testRecordingsPath)
 		require.NoError(t, ensureDirectoryWritable(path))
 		assert.DirExists(t, path)
 	})

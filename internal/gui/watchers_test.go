@@ -108,7 +108,7 @@ func TestApplyRecordingsLoadResult(t *testing.T) {
 		model := &uiModel{selectedClip: -1}
 		ui := newTestUIViews(model)
 
-		applyRecordingsLoadResult(model, ui.recordingsList, ui.recordingsErr, ui.playButton, nil, errors.New("disk offline"), false)
+		applyRecordingsLoadResult(model, ui.recordingsList, ui.recordingsErr, ui.playButton, ui.deleteButton, nil, errors.New("disk offline"), false)
 
 		assert.Equal(t, "disk offline", model.recordingsErr)
 		assert.True(t, ui.recordingsErr.Visible())
@@ -129,7 +129,7 @@ func TestApplyRecordingsLoadResult(t *testing.T) {
 		ui.playButton.Enable()
 
 		recs := []Recording{{ID: "new", Channel: "Fire Ops", FilePath: "/tmp/new.flac"}}
-		applyRecordingsLoadResult(model, ui.recordingsList, ui.recordingsErr, ui.playButton, recs, nil, false)
+		applyRecordingsLoadResult(model, ui.recordingsList, ui.recordingsErr, ui.playButton, ui.deleteButton, recs, nil, false)
 
 		assert.Empty(t, model.recordingsErr)
 		assert.False(t, ui.recordingsErr.Visible())
@@ -145,7 +145,7 @@ func TestApplyRecordingsLoadResult(t *testing.T) {
 		ui := newTestUIViews(model)
 		ui.playButton.Enable()
 
-		applyRecordingsLoadResult(model, ui.recordingsList, ui.recordingsErr, ui.playButton, recs, nil, false)
+		applyRecordingsLoadResult(model, ui.recordingsList, ui.recordingsErr, ui.playButton, ui.deleteButton, recs, nil, false)
 
 		require.Len(t, model.recordings, 1)
 		assert.Equal(t, "one", model.recordings[0].ID)
@@ -169,10 +169,11 @@ func TestApplyRecordingsLoadResult(t *testing.T) {
 			{ID: "new"},
 			{ID: "selected"},
 		}
-		applyRecordingsLoadResult(model, ui.recordingsList, ui.recordingsErr, ui.playButton, next, nil, false)
+		model.selectedID = "selected"
+		applyRecordingsLoadResult(model, ui.recordingsList, ui.recordingsErr, ui.playButton, ui.deleteButton, next, nil, false)
 
-		assert.Equal(t, -1, model.selectedClip)
-		assert.True(t, ui.playButton.Disabled())
+		assert.Equal(t, 2, model.selectedClip)
+		assert.False(t, ui.playButton.Disabled())
 	})
 
 	t.Run("force_refresh_keeps_selection_when_data_unchanged", func(t *testing.T) {
@@ -181,7 +182,7 @@ func TestApplyRecordingsLoadResult(t *testing.T) {
 		ui := newTestUIViews(model)
 		ui.playButton.Enable()
 
-		applyRecordingsLoadResult(model, ui.recordingsList, ui.recordingsErr, ui.playButton, recs, nil, true)
+		applyRecordingsLoadResult(model, ui.recordingsList, ui.recordingsErr, ui.playButton, ui.deleteButton, recs, nil, true)
 
 		assert.Equal(t, 0, model.selectedClip)
 		assert.False(t, ui.playButton.Disabled())
@@ -243,10 +244,14 @@ func newTestUIViews(model *uiModel) uiViews {
 		updatedLabel:    widget.NewLabel(""),
 		holdButton:      widget.NewButton("Hold", nil),
 		resumeButton:    widget.NewButton("Resume", nil),
+		startRecButton:  widget.NewButton("Start Recording", nil),
+		stopRecButton:   widget.NewButton("Stop Recording", nil),
 		playButton:      widget.NewButton("Play", nil),
+		deleteButton:    widget.NewButton("Delete Selected", nil),
 		activityList:    activityList,
 		recordingsList:  recordingsList,
 		recordingsErr:   widget.NewLabel(""),
+		recordingsNote:  widget.NewLabel(""),
 		spinner:         spinner,
 	}
 }

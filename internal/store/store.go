@@ -66,7 +66,16 @@ func (s *Store) Load() (*Document, error) {
 	if err := yaml.Unmarshal(data, doc); err != nil {
 		return nil, err
 	}
-	doc.ApplyDefaults() // fill any new defaults in
+	changed, err := doc.Migrate()
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		if err := s.Save(doc); err != nil {
+			return nil, err
+		}
+	}
+	doc.ApplyDefaults()
 	return doc, nil
 }
 

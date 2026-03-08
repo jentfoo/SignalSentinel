@@ -103,6 +103,39 @@ type ControlIntent string
 const (
 	IntentResumeScan ControlIntent = "resume_scan"
 	IntentHold       ControlIntent = "hold"
+	IntentNext       ControlIntent = "next"
+	IntentPrevious   ControlIntent = "previous"
+
+	IntentJumpNumberTag   ControlIntent = "jump_number_tag"
+	IntentQuickSearchHold ControlIntent = "quick_search_hold"
+	IntentJumpMode        ControlIntent = "jump_mode"
+
+	IntentSetFavoritesQuickKeys  ControlIntent = "set_favorites_quick_keys"
+	IntentSetSystemQuickKeys     ControlIntent = "set_system_quick_keys"
+	IntentSetDepartmentQuickKeys ControlIntent = "set_department_quick_keys"
+	IntentSetServiceTypes        ControlIntent = "set_service_types"
+
+	IntentSetRecordOn  ControlIntent = "set_record_on"
+	IntentSetRecordOff ControlIntent = "set_record_off"
+
+	IntentAvoid      ControlIntent = "avoid"
+	IntentUnavoid    ControlIntent = "unavoid"
+	IntentSetVolume  ControlIntent = "set_volume"
+	IntentSetSquelch ControlIntent = "set_squelch"
+
+	IntentMenuEnter    ControlIntent = "menu_enter"
+	IntentMenuSetValue ControlIntent = "menu_set_value"
+	IntentMenuBack     ControlIntent = "menu_back"
+
+	IntentAnalyzeStart       ControlIntent = "analyze_start"
+	IntentAnalyzePauseResume ControlIntent = "analyze_pause_resume"
+	IntentPushWaterfall      ControlIntent = "push_waterfall"
+	IntentGetWaterfall       ControlIntent = "get_waterfall"
+
+	IntentSetDateTime      ControlIntent = "set_date_time"
+	IntentSetLocationRange ControlIntent = "set_location_range"
+	IntentKeepAlive        ControlIntent = "keep_alive"
+	IntentPowerOff         ControlIntent = "power_off"
 )
 
 func NewScannerSession(parent context.Context, cfg SessionConfig, hub *stateHub) (*ScannerSession, error) {

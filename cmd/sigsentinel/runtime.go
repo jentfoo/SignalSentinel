@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/jentfoo/SignalSentinel/internal/store"
@@ -24,6 +25,20 @@ type Runtime struct {
 	ctx            context.Context
 	state          *stateHub
 	recordingsPath string
+	capabilities   map[ControlIntent]CapabilitySpec
+}
+
+type RecordingDeleteFailure struct {
+	ID       string
+	FilePath string
+	Stage    string
+	Err      error
+}
+
+type RecordingDeleteReport struct {
+	Requested int
+	Deleted   []string
+	Failed    []RecordingDeleteFailure
 }
 
 func (r *Runtime) Config() *store.Document {
@@ -154,6 +169,96 @@ func (r *Runtime) AppendRecording(entry store.RecordingEntry) error {
 	})
 }
 
+func (r *Runtime) DeleteRecordingByID(id string) (RecordingDeleteReport, error) {
+	return r.DeleteRecordingsByID([]string{id})
+}
+
+func (r *Runtime) DeleteRecordingsByID(ids []string) (RecordingDeleteReport, error) {
+	report := RecordingDeleteReport{}
+	if r == nil || r.store == nil {
+		return report, errors.New("runtime store unavailable")
+	}
+
+	normalized := uniqueRecordingIDs(ids)
+	report.Requested = len(normalized)
+	if len(normalized) == 0 {
+		return report, nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	base := cloneDocument(r.doc)
+	if base == nil {
+		loaded, err := r.store.Load()
+		if err != nil {
+			return report, err
+		}
+		base = cloneDocument(loaded)
+	}
+	if base == nil {
+		return report, errors.New("runtime config missing")
+	}
+
+	entries := make(map[string]store.RecordingEntry, len(base.State.Recordings))
+	for _, rec := range base.State.Recordings {
+		entries[rec.ID] = rec
+	}
+
+	deleted := make(map[string]struct{}, len(normalized))
+	deletedIDs := make([]string, 0, len(normalized))
+	for _, id := range normalized {
+		rec, ok := entries[id]
+		if !ok {
+			report.Failed = append(report.Failed, RecordingDeleteFailure{
+				ID:    id,
+				Stage: "lookup",
+				Err:   errors.New("recording id not found"),
+			})
+			continue
+		}
+		if err := deleteRecordingFile(rec.FilePath); err != nil {
+			report.Failed = append(report.Failed, RecordingDeleteFailure{
+				ID:       rec.ID,
+				FilePath: rec.FilePath,
+				Stage:    "file_delete",
+				Err:      err,
+			})
+			continue
+		}
+		deleted[rec.ID] = struct{}{}
+		deletedIDs = append(deletedIDs, rec.ID)
+	}
+
+	if len(deleted) == 0 {
+		return report, nil
+	}
+
+	next := base.State.Recordings[:0]
+	for _, rec := range base.State.Recordings {
+		if _, remove := deleted[rec.ID]; remove {
+			continue
+		}
+		next = append(next, rec)
+	}
+	base.State.Recordings = next
+
+	if err := r.persistConfigLocked(base); err != nil {
+		for _, id := range deletedIDs {
+			rec := entries[id]
+			report.Failed = append(report.Failed, RecordingDeleteFailure{
+				ID:       id,
+				FilePath: rec.FilePath,
+				Stage:    "metadata_delete",
+				Err:      fmt.Errorf("persist metadata removal: %w", err),
+			})
+		}
+		return report, err
+	}
+	report.Deleted = append(report.Deleted, deletedIDs...)
+	return report, nil
+}
+
 func (r *Runtime) persistConfigLocked(doc *store.Document) error {
 	if r == nil || r.store == nil {
 		return errors.New("runtime store unavailable")
@@ -188,6 +293,29 @@ func cloneDocument(doc *store.Document) *store.Document {
 	clone := *doc
 	clone.State.Favorites = append([]store.Favorite(nil), doc.State.Favorites...)
 	clone.State.Recordings = append([]store.RecordingEntry(nil), doc.State.Recordings...)
+	clone.State.ScanProfiles = make([]store.ScanProfile, len(doc.State.ScanProfiles))
+	for i := range doc.State.ScanProfiles {
+		profile := doc.State.ScanProfiles[i]
+		cp := store.ScanProfile{
+			Name:               profile.Name,
+			UpdatedAt:          profile.UpdatedAt,
+			FavoritesQuickKeys: append([]int(nil), profile.FavoritesQuickKeys...),
+			ServiceTypes:       append([]int(nil), profile.ServiceTypes...),
+		}
+		if len(profile.SystemQuickKeys) > 0 {
+			cp.SystemQuickKeys = make(map[string][]int, len(profile.SystemQuickKeys))
+			for key, values := range profile.SystemQuickKeys {
+				cp.SystemQuickKeys[key] = append([]int(nil), values...)
+			}
+		}
+		if len(profile.DepartmentQuickKeys) > 0 {
+			cp.DepartmentQuickKeys = make(map[string][]int, len(profile.DepartmentQuickKeys))
+			for key, values := range profile.DepartmentQuickKeys {
+				cp.DepartmentQuickKeys[key] = append([]int(nil), values...)
+			}
+		}
+		clone.State.ScanProfiles[i] = cp
+	}
 	return &clone
 }
 
@@ -196,6 +324,10 @@ func StartRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 	doc, err := s.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load config store: %w", err)
+	}
+	capabilities := DefaultCapabilityRegistry()
+	if err := ValidateCapabilityRegistry(capabilities); err != nil {
+		return nil, fmt.Errorf("validate capabilities: %w", err)
 	}
 	if err := doc.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
@@ -212,6 +344,9 @@ func StartRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 	sessionCfg.Scanner = doc.Config.Scanner
 
 	hub := newStateHub()
+	if err := ValidateCapabilityDefaults(capabilities, hub.snapshot(), false); err != nil {
+		return nil, fmt.Errorf("validate capability defaults: %w", err)
+	}
 	session, err := NewScannerSession(ctx, sessionCfg, hub)
 	if err != nil {
 		return nil, fmt.Errorf("start scanner session: %w", err)
@@ -224,6 +359,7 @@ func StartRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 		ctx:            ctx,
 		state:          hub,
 		recordingsPath: recordingsPath,
+		capabilities:   capabilities,
 	}, nil
 }
 
@@ -256,4 +392,32 @@ func ensureDirectoryWritable(path string) error {
 		return err
 	}
 	return os.Remove(name)
+}
+
+func uniqueRecordingIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func deleteRecordingFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }

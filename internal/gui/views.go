@@ -27,10 +27,14 @@ type uiViews struct {
 	updatedLabel    *widget.Label
 	holdButton      *widget.Button
 	resumeButton    *widget.Button
+	startRecButton  *widget.Button
+	stopRecButton   *widget.Button
 	playButton      *widget.Button
 	stopButton      *widget.Button
+	deleteButton    *widget.Button
 	activityList    *widget.List
 	recordingsList  *widget.List
 	recordingsErr   *widget.Label
+	recordingsNote  *widget.Label
 	spinner         *widget.ProgressBarInfinite
 }

@@ -29,8 +29,13 @@ func TestStoreLoadAndSave(t *testing.T) {
 		assert.Equal(t, 50536, doc.Config.Scanner.ControlPort)
 		assert.Equal(t, 554, doc.Config.Scanner.RTSPPort)
 		assert.Equal(t, 10, doc.Config.Recording.HangTimeSeconds)
+		assert.Equal(t, 150, doc.Config.Activity.StartDebounceMS)
+		assert.Equal(t, 600, doc.Config.Activity.EndDebounceMS)
+		assert.Equal(t, 300, doc.Config.Activity.MinActivityMS)
+		assert.InDelta(t, 0.0, doc.Config.AudioMonitor.GainDB, 0.000001)
 		assert.Empty(t, doc.State.Favorites)
 		assert.Empty(t, doc.State.Recordings)
+		assert.Empty(t, doc.State.ScanProfiles)
 	})
 
 	t.Run("save_then_load_roundtrip", func(t *testing.T) {
@@ -53,6 +58,12 @@ func TestStoreLoadAndSave(t *testing.T) {
 			FileSize:  12345,
 			Trigger:   "telemetry",
 		}}
+		doc.State.ScanProfiles = []ScanProfile{{
+			Name:               "default",
+			FavoritesQuickKeys: []int{1, 0, 1},
+			ServiceTypes:       []int{1, 1, 0},
+			UpdatedAt:          "2026-03-08T16:00:00Z",
+		}}
 
 		err := s.Save(doc)
 		require.NoError(t, err)
@@ -66,6 +77,8 @@ func TestStoreLoadAndSave(t *testing.T) {
 		assert.Equal(t, "Local PD", loaded.State.Favorites[0].Name)
 		require.Len(t, loaded.State.Recordings, 1)
 		assert.Equal(t, "telemetry", loaded.State.Recordings[0].Trigger)
+		require.Len(t, loaded.State.ScanProfiles, 1)
+		assert.Equal(t, "default", loaded.State.ScanProfiles[0].Name)
 	})
 
 	t.Run("empty_path_uses_default", func(t *testing.T) {
@@ -129,6 +142,7 @@ func TestStoreLoadAndSave(t *testing.T) {
 		s := New(path)
 		doc, err := s.Load()
 		require.NoError(t, err)
+		assert.Equal(t, CurrentVersion, doc.Version)
 		assert.Equal(t, "not-an-ip", doc.Config.Scanner.IP)
 		assert.Equal(t, 50536, doc.Config.Scanner.ControlPort)
 	})
@@ -207,6 +221,29 @@ func TestDocumentValidate(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "hang")
 	})
+
+	t.Run("invalid_audio_gain", func(t *testing.T) {
+		doc := DefaultDocument()
+		doc.Config.Scanner.IP = testScannerIP
+		doc.Config.AudioMonitor.GainDB = 99
+
+		err := doc.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "gain")
+	})
+
+	t.Run("duplicate_scan_profile_name", func(t *testing.T) {
+		doc := DefaultDocument()
+		doc.Config.Scanner.IP = testScannerIP
+		doc.State.ScanProfiles = []ScanProfile{
+			{Name: "Ops"},
+			{Name: "ops"},
+		}
+
+		err := doc.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unique")
+	})
 }
 
 func TestApplyDefaults(t *testing.T) {
@@ -231,5 +268,35 @@ func TestApplyDefaults(t *testing.T) {
 		assert.Equal(t, 554, doc.Config.Scanner.RTSPPort)
 		assert.Equal(t, "recordings", doc.Config.Storage.RecordingsPath)
 		assert.Equal(t, 10, doc.Config.Recording.HangTimeSeconds)
+		assert.Equal(t, 150, doc.Config.Activity.StartDebounceMS)
+		assert.Equal(t, 600, doc.Config.Activity.EndDebounceMS)
+		assert.Equal(t, 300, doc.Config.Activity.MinActivityMS)
+		assert.InDelta(t, 0.0, doc.Config.AudioMonitor.GainDB, 0.000001)
+	})
+}
+
+func TestDocumentMigrate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("migrates_v1_to_current_version", func(t *testing.T) {
+		doc := &Document{
+			Version: LegacyVersion1,
+			Config: Config{
+				Scanner: ScannerConfig{IP: testScannerIP},
+			},
+		}
+
+		changed, err := doc.Migrate()
+		require.NoError(t, err)
+		assert.True(t, changed)
+		assert.Equal(t, CurrentVersion, doc.Version)
+		assert.Equal(t, 150, doc.Config.Activity.StartDebounceMS)
+	})
+
+	t.Run("rejects_unknown_version", func(t *testing.T) {
+		doc := &Document{Version: 99}
+		changed, err := doc.Migrate()
+		require.Error(t, err)
+		assert.False(t, changed)
 	})
 }

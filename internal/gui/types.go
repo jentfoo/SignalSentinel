@@ -51,6 +51,18 @@ type Recording struct {
 	Trigger   string
 }
 
+type DeleteReportFailure struct {
+	ID      string
+	Stage   string
+	Message string
+}
+
+type DeleteReport struct {
+	Requested int
+	Deleted   []string
+	Failed    []DeleteReportFailure
+}
+
 type Settings struct {
 	ScannerIP       string
 	RecordingsPath  string
@@ -59,12 +71,15 @@ type Settings struct {
 }
 
 type Dependencies struct {
-	Title           string
-	InitialState    RuntimeState
-	InitialSettings Settings
-	SubscribeState  func(context.Context) <-chan RuntimeState
-	EnqueueControl  func(ControlIntent)
-	LoadRecordings  func() ([]Recording, error)
-	SaveSettings    func(Settings) error
-	Fatal           <-chan error
+	Title            string
+	InitialState     RuntimeState
+	InitialSettings  Settings
+	SubscribeState   func(context.Context) <-chan RuntimeState
+	EnqueueControl   func(ControlIntent)
+	StartRecording   func() error
+	StopRecording    func() error
+	LoadRecordings   func() ([]Recording, error)
+	DeleteRecordings func([]string) (DeleteReport, error)
+	SaveSettings     func(Settings) error
+	Fatal            <-chan error
 }

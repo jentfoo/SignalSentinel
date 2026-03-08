@@ -4,9 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 )
 
-const CurrentVersion = 1
+const (
+	LegacyVersion1 = 1
+	CurrentVersion = 2
+)
 
 // Document is the persisted YAML payload for app-owned config and metadata.
 type Document struct {
@@ -17,9 +21,11 @@ type Document struct {
 
 // Config contains user-managed values that should persist.
 type Config struct {
-	Scanner   ScannerConfig   `yaml:"scanner"`
-	Storage   StorageConfig   `yaml:"storage"`
-	Recording RecordingConfig `yaml:"recording"`
+	Scanner      ScannerConfig      `yaml:"scanner"`
+	Storage      StorageConfig      `yaml:"storage"`
+	Recording    RecordingConfig    `yaml:"recording"`
+	Activity     ActivityConfig     `yaml:"activity"`
+	AudioMonitor AudioMonitorConfig `yaml:"audio_monitor"`
 }
 
 type ScannerConfig struct {
@@ -36,10 +42,23 @@ type RecordingConfig struct {
 	HangTimeSeconds int `yaml:"hang_time_seconds"`
 }
 
+type ActivityConfig struct {
+	StartDebounceMS int `yaml:"start_debounce_ms"`
+	EndDebounceMS   int `yaml:"end_debounce_ms"`
+	MinActivityMS   int `yaml:"min_activity_ms"`
+}
+
+type AudioMonitorConfig struct {
+	DefaultEnabled bool    `yaml:"default_enabled"`
+	OutputDevice   string  `yaml:"output_device"`
+	GainDB         float64 `yaml:"gain_db"`
+}
+
 // State contains persisted, app-managed metadata and never scanner live state.
 type State struct {
-	Favorites  []Favorite       `yaml:"favorites"`
-	Recordings []RecordingEntry `yaml:"recordings,omitempty"`
+	Favorites    []Favorite       `yaml:"favorites"`
+	Recordings   []RecordingEntry `yaml:"recordings,omitempty"`
+	ScanProfiles []ScanProfile    `yaml:"scan_profiles,omitempty"`
 }
 
 // Favorite is an app-level quick entry for operator navigation.
@@ -64,6 +83,38 @@ type RecordingEntry struct {
 	Trigger   string `yaml:"trigger"`
 }
 
+// ScanProfile stores app-owned scan scope presets for quick keys and service types.
+type ScanProfile struct {
+	Name                string           `yaml:"name"`
+	FavoritesQuickKeys  []int            `yaml:"favorites_quick_keys,omitempty"`
+	SystemQuickKeys     map[string][]int `yaml:"system_quick_keys,omitempty"`
+	DepartmentQuickKeys map[string][]int `yaml:"department_quick_keys,omitempty"`
+	ServiceTypes        []int            `yaml:"service_types,omitempty"`
+	UpdatedAt           string           `yaml:"updated_at,omitempty"`
+}
+
+func (d *Document) Migrate() (bool, error) {
+	if d == nil {
+		return false, errors.New("document is nil")
+	}
+
+	changed := false
+	if d.Version == 0 {
+		d.Version = LegacyVersion1
+		changed = true
+	}
+	switch d.Version {
+	case LegacyVersion1:
+		d.Version = CurrentVersion
+		changed = true
+	case CurrentVersion:
+	default:
+		return false, fmt.Errorf("unsupported version: %d", d.Version)
+	}
+	d.ApplyDefaults()
+	return changed, nil
+}
+
 func (d *Document) ApplyDefaults() {
 	if d == nil {
 		return
@@ -83,6 +134,15 @@ func (d *Document) ApplyDefaults() {
 	if d.Config.Recording.HangTimeSeconds == 0 {
 		d.Config.Recording.HangTimeSeconds = 10
 	}
+	if d.Config.Activity.StartDebounceMS == 0 {
+		d.Config.Activity.StartDebounceMS = 150
+	}
+	if d.Config.Activity.EndDebounceMS == 0 {
+		d.Config.Activity.EndDebounceMS = 600
+	}
+	if d.Config.Activity.MinActivityMS == 0 {
+		d.Config.Activity.MinActivityMS = 300
+	}
 }
 
 func (d *Document) Validate() error {
@@ -100,6 +160,26 @@ func (d *Document) Validate() error {
 		return errors.New("recordings path is required")
 	} else if d.Config.Recording.HangTimeSeconds < 1 {
 		return errors.New("hang time must be >= 1")
+	} else if d.Config.Activity.StartDebounceMS < 0 {
+		return errors.New("activity start debounce must be >= 0")
+	} else if d.Config.Activity.EndDebounceMS < 0 {
+		return errors.New("activity end debounce must be >= 0")
+	} else if d.Config.Activity.MinActivityMS < 0 {
+		return errors.New("activity minimum duration must be >= 0")
+	} else if d.Config.AudioMonitor.GainDB < -60 || d.Config.AudioMonitor.GainDB > 24 {
+		return errors.New("audio monitor gain must be between -60 and 24 dB")
+	}
+	names := map[string]struct{}{}
+	for _, profile := range d.State.ScanProfiles {
+		name := strings.TrimSpace(profile.Name)
+		if name == "" {
+			return errors.New("scan profile name is required")
+		}
+		key := strings.ToLower(name)
+		if _, exists := names[key]; exists {
+			return fmt.Errorf("scan profile name must be unique: %s", profile.Name)
+		}
+		names[key] = struct{}{}
 	}
 	return nil
 }

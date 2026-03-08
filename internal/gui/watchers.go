@@ -39,7 +39,7 @@ func pollRecordings(ctx context.Context, deps Dependencies, ui uiViews, model *u
 		case <-ticker.C:
 			recs, err := deps.LoadRecordings()
 			fyne.Do(func() {
-				applyRecordingsLoadResult(model, ui.recordingsList, ui.recordingsErr, ui.playButton, recs, err, false)
+				applyRecordingsLoadResult(model, ui.recordingsList, ui.recordingsErr, ui.playButton, ui.deleteButton, recs, err, false)
 			})
 		}
 	}
@@ -81,6 +81,7 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 	model.state = state
 	fatalReceived := model.fatalReceived
 	everConnected := model.everConnected
+	recordingOn := model.recordingOn
 	model.mu.Unlock()
 
 	scanner := state.Scanner
@@ -137,11 +138,22 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 	} else {
 		ui.resumeButton.Disable()
 	}
+	if recordingOn {
+		ui.startRecButton.Disable()
+		ui.stopRecButton.Enable()
+	} else {
+		if canControl {
+			ui.startRecButton.Enable()
+		} else {
+			ui.startRecButton.Disable()
+		}
+		ui.stopRecButton.Disable()
+	}
 
 	ui.activityList.Refresh()
 }
 
-func applyRecordingsLoadResult(model *uiModel, list *widget.List, errLabel *widget.Label, playButton *widget.Button, recs []Recording, loadErr error, forceRefresh bool) {
+func applyRecordingsLoadResult(model *uiModel, list *widget.List, errLabel *widget.Label, playButton *widget.Button, deleteButton *widget.Button, recs []Recording, loadErr error, forceRefresh bool) {
 	if loadErr != nil {
 		model.mu.Lock()
 		model.recordingsErr = loadErr.Error()
@@ -157,9 +169,21 @@ func applyRecordingsLoadResult(model *uiModel, list *widget.List, errLabel *widg
 	hadErr := model.recordingsErr != ""
 	model.recordingsErr = ""
 	if dataChanged {
-		model.selectedClip = -1
+		prevSelectedID := model.selectedID
 		model.recordings = recs
+		model.selectedClip = -1
+		model.selectedID = ""
+		if prevSelectedID != "" {
+			for i := range recs {
+				if recs[i].ID == prevSelectedID {
+					model.selectedClip = i
+					model.selectedID = recs[i].ID
+					break
+				}
+			}
+		}
 	}
+	selectedClip := model.selectedClip
 	model.mu.Unlock()
 
 	if hadErr {
@@ -167,11 +191,24 @@ func applyRecordingsLoadResult(model *uiModel, list *widget.List, errLabel *widg
 		errLabel.Hide()
 	}
 	if dataChanged {
-		if playButton != nil {
-			playButton.Disable()
-		}
+		setEnabled(playButton, selectedClip >= 0)
+		setEnabled(deleteButton, selectedClip >= 0)
 	}
 	if changed {
 		list.Refresh()
 	}
+	if dataChanged && selectedClip >= 0 {
+		list.Select(selectedClip)
+	}
+}
+
+func setEnabled(button *widget.Button, enabled bool) {
+	if button == nil {
+		return
+	}
+	if enabled {
+		button.Enable()
+		return
+	}
+	button.Disable()
 }

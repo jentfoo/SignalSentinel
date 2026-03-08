@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -25,8 +26,17 @@ func Run(ctx context.Context, deps Dependencies) error {
 	if deps.EnqueueControl == nil {
 		return errors.New("gui control callback is required")
 	}
+	if deps.StartRecording == nil {
+		return errors.New("gui recording start callback is required")
+	}
+	if deps.StopRecording == nil {
+		return errors.New("gui recording stop callback is required")
+	}
 	if deps.LoadRecordings == nil {
 		return errors.New("gui recordings callback is required")
+	}
+	if deps.DeleteRecordings == nil {
+		return errors.New("gui recordings delete callback is required")
 	}
 	if deps.SaveSettings == nil {
 		return errors.New("gui save settings callback is required")
@@ -112,8 +122,12 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 	resumeButton := widget.NewButton("Resume Scan", func() {
 		deps.EnqueueControl(IntentResumeScan)
 	})
+	startRecButton := widget.NewButton("Start Recording", nil)
+	stopRecButton := widget.NewButton("Stop Recording", nil)
 	holdButton.Disable()
 	resumeButton.Disable()
+	startRecButton.Disable()
+	stopRecButton.Disable()
 
 	activityList := widget.NewList(
 		func() int {
@@ -159,11 +173,26 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 	)
 	var stopButton *widget.Button
 	var playButton *widget.Button
+	var deleteButton *widget.Button
 	recordingsList.OnSelected = func(id widget.ListItemID) {
 		model.mu.Lock()
 		model.selectedClip = id
+		model.selectedID = ""
+		if id >= 0 && id < len(model.recordings) {
+			model.selectedID = model.recordings[id].ID
+		}
 		model.mu.Unlock()
 		playButton.Enable()
+		deleteButton.Enable()
+	}
+	recordingsList.OnUnselected = func(id widget.ListItemID) {
+		_ = id
+		model.mu.Lock()
+		model.selectedClip = -1
+		model.selectedID = ""
+		model.mu.Unlock()
+		playButton.Disable()
+		deleteButton.Disable()
 	}
 	recordingsErrLabel := widget.NewLabel("")
 	recordingsErrLabel.Hide()
@@ -227,17 +256,86 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 	})
 	stopButton.Disable()
 
-	refreshRecordings := widget.NewButton("Refresh", nil)
-	refreshRecordings.OnTapped = func() {
-		refreshRecordings.Disable()
+	startRecButton.OnTapped = func() {
+		startRecButton.Disable()
 		go func() {
-			recs, err := deps.LoadRecordings()
+			err := deps.StartRecording()
 			fyne.Do(func() {
-				applyRecordingsLoadResult(model, recordingsList, recordingsErrLabel, playButton, recs, err, true)
-				refreshRecordings.Enable()
+				startRecButton.Enable()
+				if err != nil {
+					dialog.ShowError(err, window)
+					return
+				}
+				model.mu.Lock()
+				model.recordingOn = true
+				model.mu.Unlock()
+				startRecButton.Disable()
+				stopRecButton.Enable()
 			})
 		}()
 	}
+
+	stopRecButton.OnTapped = func() {
+		stopRecButton.Disable()
+		go func() {
+			err := deps.StopRecording()
+			fyne.Do(func() {
+				if err != nil {
+					stopRecButton.Enable()
+					dialog.ShowError(err, window)
+					return
+				}
+				model.mu.Lock()
+				model.recordingOn = false
+				model.mu.Unlock()
+				startRecButton.Enable()
+			})
+		}()
+	}
+
+	deleteButton = widget.NewButton("Delete Selected", func() {
+		model.mu.Lock()
+		idx := model.selectedClip
+		var rec Recording
+		if idx >= 0 && idx < len(model.recordings) {
+			rec = model.recordings[idx]
+		} else {
+			idx = -1
+		}
+		model.mu.Unlock()
+		if idx < 0 {
+			dialog.ShowInformation("Delete", "Select a recording first.", window)
+			return
+		}
+		name := filepath.Base(rec.FilePath)
+		if strings.TrimSpace(name) == "." || strings.TrimSpace(name) == "" {
+			name = rec.ID
+		}
+		dialog.ShowConfirm("Delete Recording", fmt.Sprintf("Delete recording %q?", name), func(ok bool) {
+			if !ok {
+				return
+			}
+			deleteButton.Disable()
+			go func(target Recording) {
+				report, err := deps.DeleteRecordings([]string{target.ID})
+				recs, loadErr := deps.LoadRecordings()
+				fyne.Do(func() {
+					deleteButton.Enable()
+					applyRecordingsLoadResult(model, recordingsList, recordingsErrLabel, playButton, deleteButton, recs, loadErr, true)
+					if err != nil {
+						dialog.ShowError(err, window)
+						return
+					}
+					if len(report.Failed) > 0 {
+						dialog.ShowInformation("Delete", report.Failed[0].Message, window)
+						return
+					}
+					dialog.ShowInformation("Delete", "Recording deleted.", window)
+				})
+			}(rec)
+		}, window)
+	})
+	deleteButton.Disable()
 
 	ipEntry := widget.NewEntry()
 	ipEntry.SetText(deps.InitialSettings.ScannerIP)
@@ -291,12 +389,17 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 	controls := container.NewVBox(
 		widget.NewLabel("Scanner Control"),
 		container.NewHBox(holdButton, resumeButton),
+		widget.NewSeparator(),
+		widget.NewLabel("Recording Control"),
+		container.NewHBox(startRecButton, stopRecButton),
 	)
 
+	recordingsNote := widget.NewLabel("Local recordings only in this release. Remote scanner-hosted file browsing is not available.")
 	recordingsPanel := container.NewBorder(
 		container.NewVBox(
+			recordingsNote,
 			recordingsErrLabel,
-			container.NewHBox(playButton, stopButton, layout.NewSpacer(), refreshRecordings),
+			container.NewHBox(playButton, stopButton, deleteButton),
 		),
 		nil,
 		nil,
@@ -343,11 +446,15 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 		updatedLabel:    updatedLabel,
 		holdButton:      holdButton,
 		resumeButton:    resumeButton,
+		startRecButton:  startRecButton,
+		stopRecButton:   stopRecButton,
 		playButton:      playButton,
 		stopButton:      stopButton,
+		deleteButton:    deleteButton,
 		activityList:    activityList,
 		recordingsList:  recordingsList,
 		recordingsErr:   recordingsErrLabel,
+		recordingsNote:  recordingsNote,
 		spinner:         spinner,
 	}
 	return views, stopCurrentPlayback

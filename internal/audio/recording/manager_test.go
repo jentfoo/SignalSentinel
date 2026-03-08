@@ -247,6 +247,69 @@ func TestManagerUpdateOutputDir(t *testing.T) {
 	})
 }
 
+func TestManagerManualLifecycle(t *testing.T) {
+	t.Parallel()
+
+	t.Run("manual_start_stop_uses_manual_trigger", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		var clips []Metadata
+		m := NewManager(Config{
+			OutputDir: filepath.Join(t.TempDir(), "clips"),
+			OnFinalized: func(meta Metadata) error {
+				clips = append(clips, meta)
+				return nil
+			},
+		})
+
+		require.NoError(t, m.StartManual(idleStatus(), t0))
+		require.NoError(t, m.PushPCM([]int16{1, 2, 3}, t0.Add(time.Second)))
+		require.NoError(t, m.StopManual(t0.Add(2*time.Second)))
+
+		require.Len(t, clips, 1)
+		assert.Equal(t, "manual", clips[0].Trigger)
+	})
+
+	t.Run("manual_start_on_active_uses_mixed_trigger", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		var clips []Metadata
+		m := NewManager(Config{
+			OutputDir: filepath.Join(t.TempDir(), "clips"),
+			OnFinalized: func(meta Metadata) error {
+				clips = append(clips, meta)
+				return nil
+			},
+		})
+
+		require.NoError(t, m.StartManual(activeStatus(), t0))
+		require.NoError(t, m.PushPCM([]int16{1, 2, 3}, t0.Add(time.Second)))
+		require.NoError(t, m.StopManual(t0.Add(2*time.Second)))
+
+		require.Len(t, clips, 1)
+		assert.Equal(t, "mixed", clips[0].Trigger)
+	})
+
+	t.Run("telemetry_session_becomes_mixed_after_manual_start", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		var clips []Metadata
+		m := NewManager(Config{
+			OutputDir: filepath.Join(t.TempDir(), "clips"),
+			HangTime:  10 * time.Second,
+			OnFinalized: func(meta Metadata) error {
+				clips = append(clips, meta)
+				return nil
+			},
+		})
+
+		require.NoError(t, m.UpdateTelemetry(activeStatus(), t0))
+		require.NoError(t, m.PushPCM([]int16{1, 2, 3}, t0.Add(time.Second)))
+		require.NoError(t, m.StartManual(activeStatus(), t0.Add(2*time.Second)))
+		require.NoError(t, m.StopManual(t0.Add(3*time.Second)))
+
+		require.Len(t, clips, 1)
+		assert.Equal(t, "mixed", clips[0].Trigger)
+	})
+}
+
 func TestManagerIntegrationFlow(t *testing.T) {
 	t.Parallel()
 

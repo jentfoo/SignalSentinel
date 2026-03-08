@@ -15,6 +15,8 @@ type uiModel struct {
 	recordingsErr string
 	activities    []string
 	selectedClip  int
+	selectedID    string
+	recordingOn   bool
 	lastActive    bool
 	lastConnected bool
 	everConnected bool

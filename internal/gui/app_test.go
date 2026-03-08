@@ -21,8 +21,17 @@ func TestRun(t *testing.T) {
 			return ch
 		},
 		EnqueueControl: func(ControlIntent) {},
+		StartRecording: func() error {
+			return nil
+		},
+		StopRecording: func() error {
+			return nil
+		},
 		LoadRecordings: func() ([]Recording, error) {
 			return nil, nil
+		},
+		DeleteRecordings: func([]string) (DeleteReport, error) {
+			return DeleteReport{}, nil
 		},
 		SaveSettings: func(Settings) error {
 			return nil
@@ -49,11 +58,32 @@ func TestRun(t *testing.T) {
 			wantErr: "gui control callback is required",
 		},
 		{
+			name: "requires_recording_start_callback",
+			mutate: func(deps *Dependencies) {
+				deps.StartRecording = nil
+			},
+			wantErr: "gui recording start callback is required",
+		},
+		{
+			name: "requires_recording_stop_callback",
+			mutate: func(deps *Dependencies) {
+				deps.StopRecording = nil
+			},
+			wantErr: "gui recording stop callback is required",
+		},
+		{
 			name: "requires_recordings_loader",
 			mutate: func(deps *Dependencies) {
 				deps.LoadRecordings = nil
 			},
 			wantErr: "gui recordings callback is required",
+		},
+		{
+			name: "requires_recordings_delete_callback",
+			mutate: func(deps *Dependencies) {
+				deps.DeleteRecordings = nil
+			},
+			wantErr: "gui recordings delete callback is required",
 		},
 		{
 			name: "requires_settings_saver",

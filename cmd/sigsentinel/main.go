@@ -130,11 +130,38 @@ func run(opts cliFlags) error {
 				runtime.EnqueueControl(IntentResumeScan)
 			}
 		},
+		StartRecording: func() error {
+			status := runtime.StateSnapshot().Scanner
+			return recorder.StartManual(status, time.Now())
+		},
+		StopRecording: func() error {
+			return recorder.StopManual(time.Now())
+		},
 		LoadRecordings: func() ([]gui.Recording, error) {
 			entries, err := runtime.Recordings()
 			if err != nil {
 				return nil, err
 			}
+			var missingIDs []string
+			for _, entry := range entries {
+				path := strings.TrimSpace(entry.FilePath)
+				if path == "" {
+					continue
+				}
+				if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+					missingIDs = append(missingIDs, entry.ID)
+				}
+			}
+			if len(missingIDs) > 0 {
+				if _, deleteErr := runtime.DeleteRecordingsByID(missingIDs); deleteErr != nil {
+					return nil, fmt.Errorf("reconcile missing recordings: %w", deleteErr)
+				}
+				entries, err = runtime.Recordings()
+				if err != nil {
+					return nil, err
+				}
+			}
+
 			items := make([]gui.Recording, 0, len(entries))
 			for _, entry := range entries {
 				items = append(items, gui.Recording{
@@ -155,6 +182,26 @@ func run(opts cliFlags) error {
 				return items[i].StartedAt > items[j].StartedAt
 			})
 			return items, nil
+		},
+		DeleteRecordings: func(ids []string) (gui.DeleteReport, error) {
+			report, err := runtime.DeleteRecordingsByID(ids)
+			out := gui.DeleteReport{
+				Requested: report.Requested,
+				Deleted:   append([]string(nil), report.Deleted...),
+				Failed:    make([]gui.DeleteReportFailure, 0, len(report.Failed)),
+			}
+			for _, failure := range report.Failed {
+				msg := failure.Err.Error()
+				if failure.FilePath != "" {
+					msg = fmt.Sprintf("%s (%s)", msg, failure.FilePath)
+				}
+				out.Failed = append(out.Failed, gui.DeleteReportFailure{
+					ID:      failure.ID,
+					Stage:   failure.Stage,
+					Message: msg,
+				})
+			}
+			return out, err
 		},
 		SaveSettings: func(settings gui.Settings) error {
 			if err := runtime.UpdateConfig(func(doc *store.Document) error {

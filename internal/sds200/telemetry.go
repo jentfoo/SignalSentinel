@@ -179,8 +179,27 @@ type RuntimeStatus struct {
 	Volume      int
 	Squelch     int
 	Mute        bool
+	HoldTarget  HoldTarget
 	UpdatedAt   time.Time
 	LastSource  string
+}
+
+// IsTransmissionActive determines whether current scanner status indicates
+// voice activity that should be treated as an active transmission.
+func IsTransmissionActive(status RuntimeStatus) bool {
+	if !status.Connected {
+		return false
+	}
+	if status.SquelchOpen {
+		return true
+	}
+	return status.Signal > 0 && !status.Mute
+}
+
+type HoldTarget struct {
+	Keyword string
+	Arg1    string
+	Arg2    string
 }
 
 type TelemetryStore struct {
@@ -249,6 +268,7 @@ func (s *TelemetryStore) UpdateFromScannerInfo(info ScannerInfo) RuntimeStatus {
 	}
 
 	s.status.Hold = hasHoldState(info.Nodes)
+	s.status.HoldTarget = deriveHoldTarget(info)
 
 	if nodes := info.Nodes["ConvFrequency"]; len(nodes) > 0 {
 		cf := nodes[0]
@@ -269,6 +289,54 @@ func (s *TelemetryStore) UpdateFromScannerInfo(info ScannerInfo) RuntimeStatus {
 	}
 
 	return s.status
+}
+
+func deriveHoldTarget(info ScannerInfo) HoldTarget {
+	if target, ok := holdTargetFromNode(info.Nodes, "ConvFrequency", "CFREQ", "Index", ""); ok {
+		return target
+	}
+	if target, ok := holdTargetFromNode(info.Nodes, "TGID", "TGID", "TGID", "Site"); ok {
+		return target
+	}
+	if target, ok := holdTargetFromNode(info.Nodes, "SrchFrequency", "SWS_FREQ", "Freq", "DeptIndex"); ok {
+		return target
+	}
+	if target, ok := holdTargetFromNode(info.Nodes, "CcHitsChannel", "CCHIT", "Index", ""); ok {
+		return target
+	}
+	if target, ok := holdTargetFromNode(info.Nodes, "WxChannel", "WX", "Index", ""); ok {
+		return target
+	}
+	if target, ok := holdTargetFromNode(info.Nodes, "ToneOutChannel", "FTO", "Index", ""); ok {
+		return target
+	}
+	if target, ok := holdTargetFromNode(info.Nodes, "Department", "DEPT", "Index", "SystemIndex"); ok {
+		return target
+	}
+	if target, ok := holdTargetFromNode(info.Nodes, "System", "SYS", "Index", ""); ok {
+		return target
+	}
+	return HoldTarget{}
+}
+
+func holdTargetFromNode(nodes map[string][]map[string]string, nodeKey, keyword, arg1Key, arg2Key string) (HoldTarget, bool) {
+	values := nodes[nodeKey]
+	if len(values) == 0 {
+		return HoldTarget{}, false
+	}
+	node := values[0]
+	arg1 := strings.TrimSpace(node[arg1Key])
+	if arg1 == "" {
+		return HoldTarget{}, false
+	}
+	target := HoldTarget{
+		Keyword: keyword,
+		Arg1:    arg1,
+	}
+	if arg2Key != "" {
+		target.Arg2 = strings.TrimSpace(node[arg2Key])
+	}
+	return target, true
 }
 
 func extractName(nodes []map[string]string) string {

@@ -28,7 +28,6 @@ type PCMWriter interface {
 // FLACWriter writes FLAC files using verbatim subframes.
 type FLACWriter struct {
 	finalPath string
-	tmpPath   string
 	f         *renameio.PendingFile
 
 	pending []int16
@@ -52,14 +51,13 @@ func NewFLACWriter(finalPath string) (*FLACWriter, error) {
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 		return nil, err
 	}
-	tmp, err := renameio.TempFile("", finalPath)
+	tmp, err := renameio.TempFile(filepath.Dir(finalPath), finalPath)
 	if err != nil {
 		return nil, err
 	}
 
 	w := &FLACWriter{
 		finalPath: finalPath,
-		tmpPath:   tmp.Name(),
 		f:         tmp,
 		md5:       md5.New(),
 	}
@@ -74,11 +72,11 @@ func (w *FLACWriter) writeHeader() error {
 	if _, err := w.f.Write([]byte("fLaC")); err != nil {
 		return err
 	}
-	// Last metadata block + STREAMINFO type + 34-byte payload.
+	// Last metadata block + STREAMINFO type + 34-byte payload
 	if _, err := w.f.Write([]byte{0x80, 0x00, 0x00, 0x22}); err != nil {
 		return err
 	}
-	// Placeholder STREAMINFO, patched on finalize.
+	// Placeholder STREAMINFO, patched on finalize
 	payload := make([]byte, 34)
 	binary.BigEndian.PutUint16(payload[0:2], defaultBlockSize)
 	binary.BigEndian.PutUint16(payload[2:4], defaultBlockSize)
@@ -122,15 +120,19 @@ func (w *FLACWriter) writeFrame(samples []int16) error {
 	if err != nil {
 		return err
 	}
-	// Header: sync + fixed-block strategy + block size code + sample rate code + mono + 16-bit samples.
-	header := []byte{0xFF, 0xF8, byte(blockSizeCode<<4) | 0x0C, 0x06}
+	// Header: sync + fixed-block strategy + block size code + sample rate code + mono + 16-bit samples
+	header := []byte{0xFF, 0xF8, (blockSizeCode << 4) | 0x0C, 0x08}
 	frame = append(frame, header...)
-	frame = append(frame, encodeUTF8Uint64(w.frameNumber)...)
+	encodedFrameNumber, err := encodeUTF8Uint64(w.frameNumber)
+	if err != nil {
+		return err
+	}
+	frame = append(frame, encodedFrameNumber...)
 	frame = append(frame, blockSizeExtra...)
 	frame = append(frame, byte(flacSampleRate/1000))
 	frame = append(frame, crc8(frame))
 
-	// Subframe: zero wasted bits + verbatim coding.
+	// Subframe: zero wasted bits + verbatim coding
 	frame = append(frame, 0x02)
 	for _, sample := range samples {
 		var b [2]byte
@@ -205,7 +207,6 @@ func (w *FLACWriter) Finalize() (int64, error) {
 	}
 	w.closed = true
 	w.f = nil
-	w.tmpPath = ""
 	fi, err := os.Stat(w.finalPath)
 	if err != nil {
 		return 0, err
@@ -265,18 +266,50 @@ func putUint24(dst []byte, v uint32) {
 	dst[2] = byte(v)
 }
 
-func encodeUTF8Uint64(v uint64) []byte {
+func encodeUTF8Uint64(v uint64) ([]byte, error) {
 	switch {
 	case v <= 0x7F:
-		return []byte{byte(v)}
+		return []byte{byte(v)}, nil
 	case v <= 0x7FF:
-		return []byte{byte(0xC0 | (v >> 6)), byte(0x80 | (v & 0x3F))}
+		return []byte{byte(0xC0 | (v >> 6)), byte(0x80 | (v & 0x3F))}, nil
 	case v <= 0xFFFF:
-		return []byte{byte(0xE0 | (v >> 12)), byte(0x80 | ((v >> 6) & 0x3F)), byte(0x80 | (v & 0x3F))}
+		return []byte{byte(0xE0 | (v >> 12)), byte(0x80 | ((v >> 6) & 0x3F)), byte(0x80 | (v & 0x3F))}, nil
 	case v <= 0x1FFFFF:
-		return []byte{byte(0xF0 | (v >> 18)), byte(0x80 | ((v >> 12) & 0x3F)), byte(0x80 | ((v >> 6) & 0x3F)), byte(0x80 | (v & 0x3F))}
+		return []byte{
+			byte(0xF0 | (v >> 18)),
+			byte(0x80 | ((v >> 12) & 0x3F)),
+			byte(0x80 | ((v >> 6) & 0x3F)),
+			byte(0x80 | (v & 0x3F)),
+		}, nil
+	case v <= 0x3FFFFFF:
+		return []byte{
+			byte(0xF8 | (v >> 24)),
+			byte(0x80 | ((v >> 18) & 0x3F)),
+			byte(0x80 | ((v >> 12) & 0x3F)),
+			byte(0x80 | ((v >> 6) & 0x3F)),
+			byte(0x80 | (v & 0x3F)),
+		}, nil
+	case v <= 0x7FFFFFFF:
+		return []byte{
+			byte(0xFC | (v >> 30)),
+			byte(0x80 | ((v >> 24) & 0x3F)),
+			byte(0x80 | ((v >> 18) & 0x3F)),
+			byte(0x80 | ((v >> 12) & 0x3F)),
+			byte(0x80 | ((v >> 6) & 0x3F)),
+			byte(0x80 | (v & 0x3F)),
+		}, nil
+	case v <= 0xFFFFFFFFF:
+		return []byte{
+			0xFE,
+			byte(0x80 | ((v >> 30) & 0x3F)),
+			byte(0x80 | ((v >> 24) & 0x3F)),
+			byte(0x80 | ((v >> 18) & 0x3F)),
+			byte(0x80 | ((v >> 12) & 0x3F)),
+			byte(0x80 | ((v >> 6) & 0x3F)),
+			byte(0x80 | (v & 0x3F)),
+		}, nil
 	default:
-		return []byte{0}
+		return nil, errors.New("value exceeds FLAC UTF-8 integer range")
 	}
 }
 

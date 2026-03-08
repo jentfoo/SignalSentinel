@@ -193,6 +193,28 @@ func TestManagerClose(t *testing.T) {
 	assert.True(t, writer.finalized)
 }
 
+func TestManagerUpdateOutputDir(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rejects_blank_path", func(t *testing.T) {
+		m := NewManager(Config{OutputDir: filepath.Join(t.TempDir(), "clips")})
+		err := m.UpdateOutputDir("   ")
+		require.Error(t, err)
+		assert.Equal(t, "recording output directory is required", err.Error())
+	})
+
+	t.Run("updates_output_path", func(t *testing.T) {
+		m := NewManager(Config{OutputDir: filepath.Join(t.TempDir(), "clips")})
+		nextDir := filepath.Join(t.TempDir(), "new-clips")
+
+		require.NoError(t, m.UpdateOutputDir(nextDir))
+
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		assert.Equal(t, nextDir, m.cfg.OutputDir)
+	})
+}
+
 func TestManagerIntegrationFlow(t *testing.T) {
 	t.Parallel()
 

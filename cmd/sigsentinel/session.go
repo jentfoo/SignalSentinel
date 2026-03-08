@@ -14,6 +14,8 @@ import (
 type SDS200Client interface {
 	Resync() (sds200.RuntimeStatus, error)
 	StartPushScannerInfo(intervalMS int) error
+	Hold(tkw, x1, x2 string) error
+	JumpMode(mode, index string) error
 	OnTelemetry(handler func(sds200.RuntimeStatus))
 	TelemetrySnapshot() sds200.RuntimeStatus
 	Close() error
@@ -49,7 +51,17 @@ type ScannerSession struct {
 	wg       sync.WaitGroup
 	closeMu  sync.Once
 	stateHub *stateHub
+
+	controlMu sync.Mutex
+	controlCh chan ControlIntent
 }
+
+type ControlIntent string
+
+const (
+	IntentResumeScan ControlIntent = "resume_scan"
+	IntentHold       ControlIntent = "hold"
+)
 
 func NewScannerSession(parent context.Context, cfg SessionConfig, hub *stateHub) (*ScannerSession, error) {
 	if cfg.Address == "" {
@@ -84,13 +96,21 @@ func NewScannerSession(parent context.Context, cfg SessionConfig, hub *stateHub)
 	}
 
 	ctx, cancel := context.WithCancel(parent)
-	s := &ScannerSession{cfg: cfg, ctx: ctx, cancel: cancel, fatalErr: make(chan error, 1), stateHub: hub}
+	s := &ScannerSession{
+		cfg:       cfg,
+		ctx:       ctx,
+		cancel:    cancel,
+		fatalErr:  make(chan error, 1),
+		stateHub:  hub,
+		controlCh: make(chan ControlIntent, 1),
+	}
 	if err := s.connectAndSync(); err != nil {
 		cancel()
 		return nil, err
 	}
-	s.wg.Add(1)
+	s.wg.Add(2)
 	go s.supervise()
+	go s.controlLoop()
 	return s, nil
 }
 
@@ -110,6 +130,22 @@ func (s *ScannerSession) Close() error {
 		}
 	})
 	return nil
+}
+
+func (s *ScannerSession) EnqueueControl(intent ControlIntent) {
+	if s == nil {
+		return
+	}
+	s.controlMu.Lock()
+	select {
+	case <-s.controlCh:
+	default:
+	}
+	select {
+	case s.controlCh <- intent:
+	case <-s.ctx.Done():
+	}
+	s.controlMu.Unlock()
 }
 
 func (s *ScannerSession) supervise() {
@@ -202,6 +238,43 @@ func (s *ScannerSession) connectAndSync() error {
 	s.publishScannerState(status)
 	s.logf("scanner session connected and synchronized")
 	return nil
+}
+
+func (s *ScannerSession) controlLoop() {
+	defer s.wg.Done()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case intent := <-s.controlCh:
+			if err := s.executeIntent(intent); err != nil {
+				s.logf("control intent %q failed: %v", intent, err)
+			}
+		}
+	}
+}
+
+func (s *ScannerSession) executeIntent(intent ControlIntent) error {
+	s.mu.Lock()
+	client := s.client
+	s.mu.Unlock()
+	if client == nil {
+		return errors.New("scanner client unavailable")
+	}
+
+	switch intent {
+	case IntentResumeScan:
+		return client.JumpMode("SCN_MODE", "0")
+	case IntentHold:
+		status := client.TelemetrySnapshot()
+		target := status.HoldTarget
+		if target.Keyword == "" || target.Arg1 == "" {
+			return errors.New("hold target unavailable for current scanner state")
+		}
+		return client.Hold(target.Keyword, target.Arg1, target.Arg2)
+	default:
+		return fmt.Errorf("unsupported control intent: %s", intent)
+	}
 }
 
 func (s *ScannerSession) publishScannerState(status sds200.RuntimeStatus) {

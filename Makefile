@@ -1,40 +1,52 @@
 export GO111MODULE = on
 
 LDFLAGS := -ldflags "-s -w"
+GO_BUILD := go build
+GO_TEST := go test
+APP_PKG := ./cmd/sigsentinel
 
-.PHONY: build build-cross clean test test-all test-cover bench lint
+.PHONY: build build-gui check-gui-deps clean test test-all test-cover bench lint
 
-build:
+build: build-gui
+
+build-gui: check-gui-deps
 	@mkdir -p bin
-	go build $(LDFLAGS) -o bin/sigsentinel ./sigsentinel
+	$(GO_BUILD) $(LDFLAGS) -o bin/sigsentinel $(APP_PKG)
 
-PLATFORMS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 windows-arm64
-
-build-cross:
-	@mkdir -p bin
-	@for platform in $(PLATFORMS); do \
-		os=$$(echo $$platform | cut -d'-' -f1); \
-		arch=$$(echo $$platform | cut -d'-' -f2); \
-		ext=""; \
-		if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
-		echo "Building sigsentinel for $$os/$$arch..."; \
-		GOOS=$$os GOARCH=$$arch go build $(LDFLAGS) -o bin/sigsentinel-$$platform$$ext ./sigsentinel; \
-	done
+check-gui-deps:
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		if ! command -v pkg-config >/dev/null 2>&1; then \
+			echo "Missing dependency: pkg-config"; \
+			echo "Install (Debian/Ubuntu): sudo apt-get install -y pkg-config"; \
+			exit 1; \
+		fi; \
+		missing=0; \
+		for pkg in gl x11 xrandr xi xcursor xinerama xxf86vm; do \
+			if ! pkg-config --exists $$pkg; then \
+				echo "Missing dependency: $$pkg (pkg-config package)"; \
+				missing=1; \
+			fi; \
+		done; \
+		if [ $$missing -ne 0 ]; then \
+			echo "Install GUI build deps (Debian/Ubuntu): sudo apt-get install -y libgl1-mesa-dev xorg-dev"; \
+			exit 1; \
+		fi; \
+	fi
 
 clean:
 	rm -rf bin/
 
 test:
-	go test -short ./...
+	$(GO_TEST) -short -tags headless ./...
 
 test-all:
-	go test -race -cover ./...
+	$(GO_TEST) -race -cover ./...
 
 test-cover:
-	go test -race -coverprofile=test.out ./... && go tool cover --html=test.out
+	$(GO_TEST) -race -coverprofile=test.out ./... && go tool cover --html=test.out
 
 bench:
-	go test --benchmem -benchtime=20s -bench='Benchmark.*' -run='^$$' ./...
+	$(GO_TEST) --benchmem -benchtime=20s -bench='Benchmark.*' -run='^$$' -tags headless ./...
 
 lint:
 	golangci-lint run --timeout=600s && go vet ./...

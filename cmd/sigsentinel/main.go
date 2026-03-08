@@ -3,80 +3,233 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jentfoo/SignalSentinel/internal/audio/ingest"
 	"github.com/jentfoo/SignalSentinel/internal/audio/recording"
+	"github.com/jentfoo/SignalSentinel/internal/gui"
+	"github.com/jentfoo/SignalSentinel/internal/sds200"
 	"github.com/jentfoo/SignalSentinel/internal/store"
 )
 
 func main() {
-	var configPath string
-	flag.StringVar(&configPath, "config", "", "path to config YAML")
-	flag.Parse()
+	log.SetFlags(log.Ltime)
 
-	logger := log.New(os.Stderr, "", log.LstdFlags|log.LUTC)
-	if err := run(configPath, logger); err != nil {
-		logger.Printf("fatal: %v", err)
+	opts, err := parseFlags(os.Args[1:], os.Stdout)
+	if err != nil {
+		log.Printf("fatal: %v", err)
+		os.Exit(2)
+	}
+	if opts.ShowHelp {
+		return
+	}
+
+	if err := run(opts); err != nil {
+		log.Printf("fatal: %v", err)
 		os.Exit(1)
 	}
 }
 
-func run(configPath string, logger *log.Logger) error {
+func run(opts cliFlags) error {
+	if err := persistCLIOverrides(opts); err != nil {
+		return fmt.Errorf("startup: %w", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	runtime, err := StartRuntime(ctx, Options{
-		ConfigPath: configPath,
-		Logger:     logger,
+		ConfigPath: opts.ConfigPath,
 	})
 	if err != nil {
 		return fmt.Errorf("startup: %w", err)
 	}
 	defer func() { _ = runtime.Close() }()
 
-	audioSession, recorder, audioErrs, err := startAudioPipeline(ctx, runtime, logger)
+	audioSession, recorder, audioErrs, err := startAudioPipeline(ctx, runtime)
 	if err != nil {
 		return fmt.Errorf("startup: %w", err)
 	}
 	defer func() {
 		if closeErr := recorder.Close(); closeErr != nil {
-			logger.Printf("recorder close error: %v", closeErr)
+			log.Printf("recorder close error: %v", closeErr)
 		}
 	}()
 	defer func() { _ = audioSession.Close() }()
 
-	return waitForExit(ctx, runtime, audioErrs)
+	toGUIRuntimeState := func(status sds200.RuntimeStatus) gui.RuntimeState {
+		return gui.RuntimeState{
+			Scanner: gui.ScannerStatus{
+				Connected:     status.Connected,
+				Mode:          status.Mode,
+				ViewScreen:    status.ViewScreen,
+				Frequency:     status.Frequency,
+				System:        status.System,
+				Department:    status.Department,
+				Channel:       status.Channel,
+				Talkgroup:     status.Talkgroup,
+				Hold:          status.Hold,
+				Signal:        status.Signal,
+				SquelchOpen:   status.SquelchOpen,
+				Active:        sds200.IsTransmissionActive(status),
+				Mute:          status.Mute,
+				Volume:        status.Volume,
+				Squelch:       status.Squelch,
+				UpdatedAt:     status.UpdatedAt,
+				LastSource:    status.LastSource,
+				CanHoldTarget: status.HoldTarget.Keyword != "" && status.HoldTarget.Arg1 != "",
+			},
+		}
+	}
+
+	initialSettings := gui.Settings{}
+	if cfg := runtime.Config(); cfg != nil {
+		initialSettings = gui.Settings{
+			ScannerIP:       cfg.Config.Scanner.IP,
+			RecordingsPath:  cfg.Config.Storage.RecordingsPath,
+			HangTimeSeconds: cfg.Config.Recording.HangTimeSeconds,
+		}
+	}
+
+	fatalErrs := superviseSubsystems(ctx, runtime, audioErrs)
+	guiErr := gui.Run(ctx, gui.Dependencies{
+		Title:           "SignalSentinel",
+		InitialState:    toGUIRuntimeState(runtime.StateSnapshot().Scanner),
+		InitialSettings: initialSettings,
+		SubscribeState: func(subCtx context.Context) <-chan gui.RuntimeState {
+			src := runtime.SubscribeState(subCtx)
+			out := make(chan gui.RuntimeState, 1)
+			go func() {
+				defer close(out)
+				for {
+					select {
+					case <-subCtx.Done():
+						return
+					case status, ok := <-src:
+						if !ok {
+							return
+						}
+						publishLatestGUIState(out, toGUIRuntimeState(status.Scanner))
+					}
+				}
+			}()
+			return out
+		},
+		EnqueueControl: func(intent gui.ControlIntent) {
+			switch intent {
+			case gui.IntentHoldCurrent:
+				runtime.EnqueueControl(IntentHold)
+			case gui.IntentResumeScan:
+				runtime.EnqueueControl(IntentResumeScan)
+			}
+		},
+		LoadRecordings: func() ([]gui.Recording, error) {
+			entries, err := runtime.Recordings()
+			if err != nil {
+				return nil, err
+			}
+			items := make([]gui.Recording, 0, len(entries))
+			for _, entry := range entries {
+				items = append(items, gui.Recording{
+					ID:        entry.ID,
+					StartedAt: entry.StartedAt,
+					EndedAt:   entry.EndedAt,
+					Duration:  entry.Duration,
+					Frequency: entry.Frequency,
+					System:    entry.System,
+					Channel:   entry.Channel,
+					Talkgroup: entry.Talkgroup,
+					FilePath:  entry.FilePath,
+					FileSize:  entry.FileSize,
+					Trigger:   entry.Trigger,
+				})
+			}
+			sort.SliceStable(items, func(i, j int) bool {
+				return items[i].StartedAt > items[j].StartedAt
+			})
+			return items, nil
+		},
+		SaveSettings: func(settings gui.Settings) error {
+			if err := runtime.UpdateConfig(func(doc *store.Document) error {
+				doc.Config.Scanner.IP = strings.TrimSpace(settings.ScannerIP)
+				doc.Config.Storage.RecordingsPath = strings.TrimSpace(settings.RecordingsPath)
+				if settings.HangTimeChanged {
+					if settings.HangTimeSeconds < 1 {
+						return errors.New("hang-time must be >= 1 second")
+					}
+					doc.Config.Recording.HangTimeSeconds = settings.HangTimeSeconds
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			return recorder.UpdateOutputDir(runtime.RecordingsPath())
+		},
+		Fatal: fatalErrs,
+	})
+	if guiErr != nil && !errors.Is(guiErr, context.Canceled) {
+		return guiErr
+	}
+	return nil
 }
 
-func waitForExit(ctx context.Context, runtime *Runtime, audioErrs <-chan error) error {
+func superviseSubsystems(ctx context.Context, runtime *Runtime, audioErrs <-chan error) <-chan error {
+	out := make(chan error, 1)
 	runtimeDone := make(chan error, 1)
 	go func() {
 		runtimeDone <- runtime.Wait()
 	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case err := <-runtimeDone:
-			return err
-		case err := <-audioErrs:
-			if err == nil || errors.Is(err, context.Canceled) {
-				continue
+	go func() {
+		defer close(out)
+		runtimeWait := runtimeDone
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case err := <-runtimeWait:
+				runtimeWait = nil
+				if err == nil || errors.Is(err, context.Canceled) {
+					continue
+				}
+				out <- err
+				return
+			case err := <-audioErrs:
+				if err == nil || errors.Is(err, context.Canceled) {
+					continue
+				}
+				out <- err
+				return
 			}
-			return err
+		}
+	}()
+
+	return out
+}
+
+func publishLatestGUIState(out chan gui.RuntimeState, state gui.RuntimeState) {
+	select {
+	case out <- state:
+	default:
+		select {
+		case <-out:
+		default:
+		}
+		select {
+		case out <- state:
+		default:
 		}
 	}
 }
 
-func startAudioPipeline(ctx context.Context, runtime *Runtime, logger *log.Logger) (*ingest.Session, *recording.Manager, <-chan error, error) {
+func startAudioPipeline(ctx context.Context, runtime *Runtime) (*ingest.Session, *recording.Manager, <-chan error, error) {
 	audioErrs := make(chan error, 1)
 	doc := runtime.Config()
 	if doc == nil {
@@ -100,10 +253,10 @@ func startAudioPipeline(ctx context.Context, runtime *Runtime, logger *log.Logge
 				FileSize:  meta.FileSize,
 				Trigger:   meta.Trigger,
 			}
-			if err := runtime.Store().AppendRecording(entry); err != nil {
+			if err := runtime.AppendRecording(entry); err != nil {
 				return fmt.Errorf("persist recording metadata: %w", err)
 			}
-			logger.Printf("recording finalized: %s (%s)", meta.FilePath, meta.Duration)
+			log.Printf("recording finalized: %s (%s)", meta.FilePath, meta.Duration)
 			return nil
 		},
 	})
@@ -153,7 +306,6 @@ func startAudioPipeline(ctx context.Context, runtime *Runtime, logger *log.Logge
 		RTSPPort:          doc.Config.Scanner.RTSPPort,
 		ReconnectDelay:    2 * time.Second,
 		MaxReconnectFails: 5,
-		Logger:            logger,
 		OnFrame: func(frame ingest.Frame) {
 			if err := rec.PushPCM(frame.Samples, frame.ReceivedAt); err != nil {
 				select {

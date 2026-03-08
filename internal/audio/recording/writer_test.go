@@ -26,6 +26,8 @@ func TestNewFLACWriter(t *testing.T) {
 		w, err := NewFLACWriter(out)
 		require.NoError(t, err)
 		require.NotNil(t, w)
+		require.NotNil(t, w.f)
+		assert.Equal(t, filepath.Dir(out), filepath.Dir(w.f.Name()))
 		require.NoError(t, w.Abort())
 	})
 }
@@ -65,7 +67,8 @@ func TestFLACWriterWritePCM(t *testing.T) {
 		}
 		require.NoError(t, w.WritePCM(samples))
 
-		fi, err := os.Stat(w.tmpPath)
+		tmpPath := pendingPathFromWriter(t, w)
+		fi, err := os.Stat(tmpPath)
 		require.NoError(t, err)
 		assert.Greater(t, fi.Size(), int64(42))
 
@@ -117,8 +120,8 @@ func TestFLACWriterFinalize(t *testing.T) {
 		assert.Equal(t, []byte("fLaC"), b[:4])
 
 		// Byte 4: metadata block header (last-block=1, type=0 STREAMINFO)
-		assert.Equal(t, byte(0x80), b[4]&0x80, "last-block flag")
-		assert.Equal(t, byte(0x00), b[4]&0x7F, "block type STREAMINFO")
+		assert.Equal(t, byte(0x80), b[4]&0x80)
+		assert.Equal(t, byte(0x00), b[4]&0x7F)
 
 		// STREAMINFO starts at offset 8
 		si := b[8:42]
@@ -160,7 +163,7 @@ func TestFLACWriterFinalize(t *testing.T) {
 		out := filepath.Join(t.TempDir(), "clip.flac")
 		w, err := NewFLACWriter(out)
 		require.NoError(t, err)
-		tmpPath := w.tmpPath
+		tmpPath := pendingPathFromWriter(t, w)
 
 		require.NoError(t, w.WritePCM([]int16{1, 2, 3}))
 		_, err = w.Finalize()
@@ -168,7 +171,7 @@ func TestFLACWriterFinalize(t *testing.T) {
 
 		_, err = os.Stat(tmpPath)
 		require.Error(t, err)
-		assert.ErrorIs(t, err, os.ErrNotExist)
+		require.ErrorIs(t, err, os.ErrNotExist)
 
 		// Verify final file exists
 		_, err = os.Stat(out)
@@ -199,16 +202,16 @@ func TestFLACWriterPartialFinalFrameBlockSize(t *testing.T) {
 	firstFrame := b[42:]
 	require.GreaterOrEqual(t, len(firstFrame), 4)
 	assert.Equal(t, byte(0xAC), firstFrame[2])
-	assert.Equal(t, byte(0x06), firstFrame[3])
+	assert.Equal(t, byte(0x08), firstFrame[3])
 
 	// Two full 1024-sample frames precede the final 452-sample frame.
 	const fullFrameLen = 2058
 	finalFrameOffset := 42 + (2 * fullFrameLen)
 	require.GreaterOrEqual(t, len(b), finalFrameOffset+4)
 	finalFrame := b[finalFrameOffset:]
-	assert.Equal(t, byte(0x7C), finalFrame[2], "block-size code 0x7 + sample-rate code 0xC")
-	assert.Equal(t, byte(0x06), finalFrame[3])
-	assert.Equal(t, uint16(451), binary.BigEndian.Uint16(finalFrame[5:7]), "stored as blocksize-1")
+	assert.Equal(t, byte(0x7C), finalFrame[2])
+	assert.Equal(t, byte(0x08), finalFrame[3])
+	assert.Equal(t, uint16(451), binary.BigEndian.Uint16(finalFrame[5:7]))
 }
 
 func TestFLACWriterAbort(t *testing.T) {
@@ -217,11 +220,47 @@ func TestFLACWriterAbort(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "clip.flac")
 	w, err := NewFLACWriter(out)
 	require.NoError(t, err)
-	require.NotEmpty(t, w.tmpPath)
+	tmpPath := pendingPathFromWriter(t, w)
 
-	tmpPath := w.tmpPath
 	require.NoError(t, w.Abort())
 	_, err = os.Stat(tmpPath)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestEncodeUTF8Uint64(t *testing.T) {
+	t.Parallel()
+
+	t.Run("supports_flac_extended_lengths", func(t *testing.T) {
+		encoded, err := encodeUTF8Uint64(0x3FFFFFF)
+		require.NoError(t, err)
+		assert.Len(t, encoded, 5)
+
+		encoded, err = encodeUTF8Uint64(0x7FFFFFFF)
+		require.NoError(t, err)
+		assert.Len(t, encoded, 6)
+
+		encoded, err = encodeUTF8Uint64(0xFFFFFFFFF)
+		require.NoError(t, err)
+		assert.Len(t, encoded, 7)
+		assert.Equal(t, byte(0xFE), encoded[0])
+	})
+
+	t.Run("rejects_values_out_of_range", func(t *testing.T) {
+		encoded, err := encodeUTF8Uint64(0x1000000000)
+		require.Error(t, err)
+		assert.Nil(t, encoded)
+		assert.Equal(t, "value exceeds FLAC UTF-8 integer range", err.Error())
+	})
+}
+
+func pendingPathFromWriter(t *testing.T, w *FLACWriter) string {
+	t.Helper()
+
+	require.NotNil(t, w)
+	require.NotNil(t, w.f)
+	if w.f.Name() == "" {
+		t.Fatalf("pending output file path is empty")
+	}
+	return w.f.Name()
 }

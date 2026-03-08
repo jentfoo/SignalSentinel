@@ -190,7 +190,7 @@ func TestTelemetryStoreUpdateFromScannerInfo(t *testing.T) {
 		Nodes: map[string][]map[string]string{
 			"System":        {{"Name": "County"}},
 			"Department":    {{"Name": "Fire"}},
-			"ConvFrequency": {{"Name": "Fire Ops", "Freq": "155.2200", "Hold": "On"}},
+			"ConvFrequency": {{"Name": "Fire Ops", "Freq": "155.2200", "Index": "120", "Hold": "On"}},
 		},
 	}
 	updated := store.UpdateFromScannerInfo(info)
@@ -201,6 +201,8 @@ func TestTelemetryStoreUpdateFromScannerInfo(t *testing.T) {
 	assert.Equal(t, 11, updated.Volume)
 	assert.True(t, updated.Hold)
 	assert.True(t, updated.SquelchOpen)
+	assert.Equal(t, "CFREQ", updated.HoldTarget.Keyword)
+	assert.Equal(t, "120", updated.HoldTarget.Arg1)
 }
 
 func TestTelemetryStoreUpdateFromScannerInfoTGID(t *testing.T) {
@@ -219,7 +221,7 @@ func TestTelemetryStoreUpdateFromScannerInfoTGID(t *testing.T) {
 		Nodes: map[string][]map[string]string{
 			"System":     {{"Name": "County P25"}},
 			"Department": {{"Name": "Law Enforcement"}},
-			"TGID":       {{"Name": "Dispatch 1", "TGID": "100", "Hold": "On"}},
+			"TGID":       {{"Name": "Dispatch 1", "TGID": "100", "Site": "2", "Hold": "On"}},
 		},
 	}
 	updated := store.UpdateFromScannerInfo(info)
@@ -231,6 +233,9 @@ func TestTelemetryStoreUpdateFromScannerInfoTGID(t *testing.T) {
 	assert.True(t, updated.Hold)
 	assert.Equal(t, 15, updated.Volume)
 	assert.Equal(t, 5, updated.Signal)
+	assert.Equal(t, "TGID", updated.HoldTarget.Keyword)
+	assert.Equal(t, "100", updated.HoldTarget.Arg1)
+	assert.Equal(t, "2", updated.HoldTarget.Arg2)
 }
 
 func TestTelemetryStoreUpdateFromScannerInfoHoldOff(t *testing.T) {
@@ -285,6 +290,44 @@ func TestParseGCSResponse(t *testing.T) {
 			assert.Equal(t, 100, got.CapacityPct)
 			assert.Equal(t, 0, got.CurrentMA)
 			assert.InDelta(t, 27.65, got.TempC, 0.001)
+		})
+	}
+}
+
+func TestIsTransmissionActive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		status RuntimeStatus
+		want   bool
+	}{
+		{
+			name:   "disconnected",
+			status: RuntimeStatus{Connected: false, SquelchOpen: true, Signal: 5},
+			want:   false,
+		},
+		{
+			name:   "squelch_open",
+			status: RuntimeStatus{Connected: true, SquelchOpen: true},
+			want:   true,
+		},
+		{
+			name:   "signal_without_mute",
+			status: RuntimeStatus{Connected: true, Signal: 3, Mute: false},
+			want:   true,
+		},
+		{
+			name:   "signal_muted",
+			status: RuntimeStatus{Connected: true, Signal: 3, Mute: true},
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsTransmissionActive(tt.status))
 		})
 	}
 }

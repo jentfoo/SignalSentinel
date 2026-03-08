@@ -56,7 +56,7 @@ func NewSession(parent context.Context, cfg Config) (*Session, error) {
 		cfg.RTSPPort = sds200.DefaultRTSPPort
 	}
 	if cfg.RTPReadTimeout == 0 {
-		cfg.RTPReadTimeout = 1500 * time.Millisecond
+		cfg.RTPReadTimeout = 2000 * time.Millisecond
 	}
 	if cfg.ReconnectDelay == 0 {
 		cfg.ReconnectDelay = 2 * time.Second
@@ -92,7 +92,7 @@ func (s *Session) drainFrames() {
 func (s *Session) loop() {
 	defer s.wg.Done()
 	defer close(s.frames)
-	fails := 0
+	var fails int
 	for {
 		if s.ctx.Err() != nil {
 			return
@@ -145,14 +145,11 @@ func (s *Session) runOnce() error {
 	}()
 	if _, err := rtspClient.Options(); err != nil {
 		return err
-	}
-	if _, err := rtspClient.Describe(); err != nil {
+	} else if _, err := rtspClient.Describe(); err != nil {
 		return err
-	}
-	if _, err := rtspClient.Setup(localPort); err != nil {
+	} else if _, err := rtspClient.Setup(localPort); err != nil {
 		return err
-	}
-	if _, err := rtspClient.Play(); err != nil {
+	} else if _, err := rtspClient.Play(); err != nil {
 		return err
 	}
 	s.connectedAt = time.Now()
@@ -255,8 +252,7 @@ func parseRTPPayload(pkt []byte) ([]byte, error) {
 		padLen := int(pkt[len(pkt)-1])
 		if padLen == 0 {
 			return nil, errors.New("invalid padding length")
-		}
-		if padLen > len(pkt)-offset {
+		} else if padLen > len(pkt)-offset {
 			return nil, errors.New("padding exceeds payload length")
 		}
 		end -= padLen

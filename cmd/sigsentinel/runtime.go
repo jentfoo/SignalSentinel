@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/jentfoo/SignalSentinel/internal/sds200"
@@ -62,6 +63,7 @@ func (o Options) withDefaults() Options {
 }
 
 type Runtime struct {
+	mu             sync.RWMutex
 	doc            *store.Document
 	store          *store.Store
 	session        *ScannerSession
@@ -71,7 +73,12 @@ type Runtime struct {
 }
 
 func (r *Runtime) Config() *store.Document {
-	return r.doc
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return cloneDocument(r.doc)
 }
 
 func (r *Runtime) Store() *store.Store { return r.store }
@@ -80,6 +87,8 @@ func (r *Runtime) RecordingsPath() string {
 	if r == nil {
 		return ""
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.recordingsPath
 }
 
@@ -124,6 +133,108 @@ func (r *Runtime) Close() error {
 		return nil
 	}
 	return r.session.Close()
+}
+
+func (r *Runtime) EnqueueControl(intent ControlIntent) {
+	if r == nil || r.session == nil {
+		return
+	}
+	r.session.EnqueueControl(intent)
+}
+
+func (r *Runtime) Recordings() ([]store.RecordingEntry, error) {
+	if r == nil || r.store == nil {
+		return nil, errors.New("runtime store unavailable")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.doc == nil {
+		return nil, errors.New("runtime config missing")
+	}
+	return append([]store.RecordingEntry(nil), r.doc.State.Recordings...), nil
+}
+
+func (r *Runtime) SaveConfig(doc *store.Document) error {
+	if r == nil || r.store == nil {
+		return errors.New("runtime store unavailable")
+	}
+	if doc == nil {
+		return errors.New("config is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.persistConfigLocked(cloneDocument(doc))
+}
+
+func (r *Runtime) UpdateConfig(update func(*store.Document) error) error {
+	if r == nil || r.store == nil {
+		return errors.New("runtime store unavailable")
+	}
+	if update == nil {
+		return errors.New("config update callback is required")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	base := cloneDocument(r.doc)
+	if base == nil {
+		loaded, err := r.store.Load()
+		if err != nil {
+			return err
+		}
+		base = cloneDocument(loaded)
+	}
+	if base == nil {
+		return errors.New("runtime config missing")
+	}
+	if err := update(base); err != nil {
+		return err
+	}
+	return r.persistConfigLocked(base)
+}
+
+func (r *Runtime) AppendRecording(entry store.RecordingEntry) error {
+	return r.UpdateConfig(func(doc *store.Document) error {
+		doc.State.Recordings = append(doc.State.Recordings, entry)
+		return nil
+	})
+}
+
+func (r *Runtime) persistConfigLocked(doc *store.Document) error {
+	if r == nil || r.store == nil {
+		return errors.New("runtime store unavailable")
+	}
+	if doc == nil {
+		return errors.New("config is required")
+	}
+	doc.ApplyDefaults()
+	if err := doc.Validate(); err != nil {
+		return err
+	}
+
+	recordingsPath, err := resolveRecordingsPath(doc, r.store)
+	if err != nil {
+		return err
+	}
+	if err := ensureDirectoryWritable(recordingsPath); err != nil {
+		return fmt.Errorf("validate recordings path: %w", err)
+	}
+	if err := r.store.Save(doc); err != nil {
+		return err
+	}
+	r.doc = doc
+	r.recordingsPath = recordingsPath
+	return nil
+}
+
+func cloneDocument(doc *store.Document) *store.Document {
+	if doc == nil {
+		return nil
+	}
+	clone := *doc
+	clone.State.Favorites = append([]store.Favorite(nil), doc.State.Favorites...)
+	clone.State.Recordings = append([]store.RecordingEntry(nil), doc.State.Recordings...)
+	return &clone
 }
 
 func StartRuntime(ctx context.Context, opts Options) (*Runtime, error) {

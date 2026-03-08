@@ -79,7 +79,7 @@ func (m *Manager) UpdateTelemetry(status sds200.RuntimeStatus, at time.Time) err
 		at = m.cfg.Now()
 	}
 	m.status = status
-	res := m.detector.Evaluate(isActive(status), at)
+	res := m.detector.Evaluate(sds200.IsTransmissionActive(status), at)
 	if res.BecameActive && m.writer == nil {
 		if err := m.begin(at, status); err != nil {
 			return err
@@ -146,6 +146,17 @@ func (m *Manager) Close() error {
 		return nil
 	}
 	return m.finalize(m.cfg.Now())
+}
+
+func (m *Manager) UpdateOutputDir(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("recording output directory is required")
+	}
+	m.mu.Lock()
+	m.cfg.OutputDir = path
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *Manager) begin(at time.Time, status sds200.RuntimeStatus) error {
@@ -216,16 +227,6 @@ func (m *Manager) abortWriter() {
 	m.started = time.Time{}
 	m.lastSeen = time.Time{}
 	m.clipInfo = sds200.RuntimeStatus{}
-}
-
-func isActive(status sds200.RuntimeStatus) bool {
-	if !status.Connected {
-		return false
-	}
-	if status.SquelchOpen {
-		return true
-	}
-	return status.Signal > 0 && !status.Mute
 }
 
 func sanitizeSegment(s, fallback string) string {

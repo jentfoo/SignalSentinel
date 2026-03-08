@@ -1,6 +1,7 @@
 package sds200
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -249,6 +250,10 @@ func (c *Client) handleUnsolicited(cmd string, fields []string, raw []byte) {
 	resp := CommandResponse{Command: cmd, Fields: fields, Raw: raw}
 	switch cmd {
 	case cmdPSI, cmdGSI:
+		// PSI acknowledgments (e.g. PSI,OK) are not XML; skip them.
+		if !bytes.Contains(raw, []byte(",<XML>,")) {
+			break
+		}
 		if fragment, err := parseXMLFragment(raw); err == nil {
 			asm := c.pushXML[cmd]
 			if asm == nil {

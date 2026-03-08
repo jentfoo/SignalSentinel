@@ -645,12 +645,12 @@ func TestGetWaterfallFFTBinaryAcceptsGWFResponse(t *testing.T) {
 	assert.Equal(t, []byte{0x04, 0x05, 0x06}, data)
 }
 
-func TestStartPushScannerInfoNoImmediateResponse(t *testing.T) {
+func TestStartPushScannerInfoAcknowledgement(t *testing.T) {
 	t.Parallel()
 
 	client, _ := newCommandTestClient(t, func(req string) []string {
 		if readRequestCommand(req) == cmdPSI {
-			return nil
+			return []string{"PSI,OK\r"}
 		}
 		return nil
 	})

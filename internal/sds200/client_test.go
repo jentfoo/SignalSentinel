@@ -200,7 +200,7 @@ func TestClientProcessesUnsolicitedWhenIdle(t *testing.T) {
 
 	client := newTestClient(t, func(req string) []string {
 		if readRequestCommand(req) == cmdPSI {
-			return []string{splitXMLResponse("PSI", scannerInfoXML("Scan Mode"))}
+			return []string{"PSI,OK\r", splitXMLResponse("PSI", scannerInfoXML("Scan Mode"))}
 		}
 		return nil
 	})

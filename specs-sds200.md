@@ -4,6 +4,10 @@ Scope: all network-facing protocols supported by the SDS200 over Ethernet, cover
 
 Primary sources: Uniden's official protocol PDFs from the [SDS200 Firmware Update page][1].
 
+Terminology note: document revisions such as **Remote Command Spec V1.02/V2.00**
+are protocol document versions, not scanner firmware numbers. SDS200 firmware
+versions are reported by `VER` as radio main/sub firmware values.
+
 ---
 
 ## 1. Network Services Overview
@@ -55,11 +59,25 @@ PC → Scanner:    MDL\r
 Scanner → PC:    MDL,SDS200\r
 ```
 
-**B) XML-based (multi-packet) responses**
+**B) XML responses**
 
-Large responses (e.g., `GLT`, `PSI`, `GSI`) are split across multiple UDP packets. Each packet is a self-contained fragment prefixed with `CMD,<XML>,\r`.
+XML responses are prefixed with `CMD,<XML>,` and may be single-packet or multi-packet.
 
-Reassembly uses the `<Footer>` element:
+**Single-packet XML responses:** When the full XML fits in one UDP datagram, the scanner sends the complete document **without a `<Footer>` element**. The XML body uses embedded `\r` characters as line separators within the payload (not just as a terminator).
+
+```
+PC → Scanner:    GSI\r
+
+Scanner → PC:    GSI,<XML>,\r
+                 <?xml version="1.0" encoding="utf-8"?>\r
+                 <ScannerInfo Mode="Menu tree" V_Screen="menu_selection">\r
+                   <MenuSummary name="Show IPs" index="4293304272" />\r
+                   <ViewDescription>\r
+                   </ViewDescription>\r
+                 </ScannerInfo>\r
+```
+
+**Multi-packet XML responses:** Large responses (e.g., `GLT`) are split across multiple UDP packets. Each packet includes a `<Footer>` element for reassembly:
 
 | Attribute | Meaning |
 |-----------|---------|
@@ -68,10 +86,11 @@ Reassembly uses the `<Footer>` element:
 | `EOT="1"` | **End of transmission** (last packet) |
 
 **Reassembly procedure:**
-1. Collect packets, tracking `Footer No` values
-2. Detect gaps in sequence numbers to identify lost packets
-3. On the packet with `EOT="1"`, transmission is complete
-4. If packets are lost, **retry the entire request**
+1. If no `<Footer>` tag is present and the XML has a closing root tag, treat as a complete single-packet response
+2. Otherwise, collect packets, tracking `Footer No` values
+3. Detect gaps in sequence numbers to identify lost packets
+4. On the packet with `EOT="1"`, transmission is complete
+5. If packets are lost, **retry the entire request**
 
 ```
 PC → Scanner:    GLT,FL\r
@@ -112,6 +131,23 @@ Scanner → PC:    GLT,<XML>,
 **Source:** [Remote Command Specification V1.02][6] (2023-12-22, 38 pages). Based on BCD536HP/BCD436HP Remote Command Specification V1.05. Version history: 0.01 (2018-04-13) initial; 1.01 (2023-12-11) added Waterfall; 1.02 (2023-12-22) added GST command.
 
 A newer version exists: [SDS Series Remote Command Specification V2.00][7] (covers SDS100/SDS200/SDS150). V2.00 version history: 1.03 (2024-12-04) added POF/GCS commands; 2.00 (2025-07-07) added GW2 and KAL commands. **SDS200 supports all commands from V2.00.**
+
+### 4.0 Radio Firmware Requirements (SDS200)
+
+Use this table to map protocol features to the **minimum required radio
+capability level**:
+
+| Feature/Command Set | Requirement on Radio Firmware | How to Validate |
+|---------------------|-------------------------------|-----------------|
+| Core commands (`MDL`..`GWF`, commands 1-30) | Firmware implementing the Remote Command V1.02 behavior | `MDL` responds with SDS200 and command set 1-30 works |
+| Added in spec rev 1.03: `POF`, `GCS` | Firmware implementing 1.03 additions (2024-12-04) | `POF` returns `POF,OK`; `GCS` returns `GCS,...` |
+| Added in spec V2.00: `KAL`, `GW2` labeling | Firmware implementing 2.00 additions (2025-07-07) | `KAL` accepted with no response; `GWF` may respond as `GW2,...` |
+
+Important:
+- There is no separate "v2 radio firmware" naming scheme on SDS200; "V2.00"
+  refers to the remote-command specification document.
+- Always detect capabilities at runtime by probing commands (`POF`, `GCS`,
+  `KAL`) and handling `NG` or legacy responses for backward compatibility.
 
 ### 4.1 Command Summary
 
@@ -169,7 +205,7 @@ Response:  MDL,[MODEL_NAME]\r
 ```
 Request:   VER\r
 Response:  VER,[VERSION]\r
-           VERSION: x.xx.xx
+           VERSION: "Version x.xx.xx" (includes "Version " prefix)
 ```
 
 ### 4.3 Key / UI Control
@@ -263,10 +299,11 @@ V2.00 Response (adds LED and color fields):
 **PSI** -- Push Scanner Information (periodic XML)
 
 ```
-Request:   PSI\r
+Request:   PSI[,interval_ms]\r
+Response:  PSI,OK\r
 ```
 
-After receiving PSI, the scanner outputs XML status information **periodically** at a configurable interval. The user can change the interval by parameter.
+The scanner acknowledges with `PSI,OK\r`, then outputs XML status information **periodically** at the configured interval (milliseconds). Subsequent push updates arrive as unsolicited `PSI,<XML>,...` packets using the same XML format as GSI.
 
 **GSI** -- Get Scanner Information (one-shot XML)
 
@@ -900,7 +937,7 @@ RET_LEVEL:
 
 ### 4.14 Commands Added in V2.00
 
-These commands are present in the [SDS Series Remote Command Specification V2.00][7] but not in V1.02. All apply to SDS200.
+These commands are present in the [SDS Series Remote Command Specification V2.00][7] but not in V1.02. They apply to SDS200 radios whose firmware includes the V2.00-era additions (see 4.0).
 
 **GW2** -- Get Waterfall FFT Information (Binary, no separator)
 

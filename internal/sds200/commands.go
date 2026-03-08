@@ -168,8 +168,7 @@ func (c *Client) StartPushScannerInfo(intervalMS int) error {
 	if intervalMS > 0 {
 		args = append(args, strconv.Itoa(intervalMS))
 	}
-	_, err := c.execute(CommandSpec{Command: cmdPSI, Mode: ModeNoResponse}, args...)
-	return err
+	return c.executeOK(CommandSpec{Command: cmdPSI, Mode: ModeNormal}, args...)
 }
 
 func (c *Client) GetScannerInfo() (ScannerInfo, error) {

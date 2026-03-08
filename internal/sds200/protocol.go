@@ -110,24 +110,45 @@ func parseXMLFragment(raw []byte) (*xmlFragment, error) {
 	x = strings.ReplaceAll(x, "\n", "")
 	x = strings.TrimSpace(x)
 
+	var seq int
+	var eot bool
+
 	footerTag := footerTagPattern.FindString(x)
-	if footerTag == "" {
-		return nil, errors.New("xml footer missing")
+	if footerTag != "" {
+		noMatch := footerNoPattern.FindStringSubmatch(footerTag)
+		eotMatch := footerEOTPattern.FindStringSubmatch(footerTag)
+		if len(noMatch) != 2 || len(eotMatch) != 2 {
+			return nil, errors.New("xml footer missing attributes")
+		}
+
+		var err error
+		seq, err = strconv.Atoi(noMatch[1])
+		if err != nil {
+			return nil, fmt.Errorf("invalid footer sequence: %w", err)
+		}
+		eot = eotMatch[1] == "1"
+		x = strings.ReplaceAll(x, footerTag, "")
+	} else {
+		// Single-packet responses may omit the Footer tag entirely.
+		// Verify the XML is self-contained (has a closing root tag).
+		xmlBody := strings.TrimPrefix(strings.TrimSpace(x), `<?xml version="1.0" encoding="utf-8"?>`)
+		xmlBody = strings.TrimSpace(xmlBody)
+		if start := strings.Index(xmlBody, "<"); start >= 0 {
+			end := strings.Index(xmlBody[start:], ">")
+			if end >= 0 {
+				rootName := xmlBody[start+1 : start+end]
+				if i := strings.IndexAny(rootName, " >/"); i >= 0 {
+					rootName = rootName[:i]
+				}
+				if !strings.Contains(xmlBody, "</"+rootName+">") {
+					return nil, errors.New("xml footer missing")
+				}
+			}
+		}
+		seq = 1
+		eot = true
 	}
 
-	noMatch := footerNoPattern.FindStringSubmatch(footerTag)
-	eotMatch := footerEOTPattern.FindStringSubmatch(footerTag)
-	if len(noMatch) != 2 || len(eotMatch) != 2 {
-		return nil, errors.New("xml footer missing attributes")
-	}
-
-	seq, err := strconv.Atoi(noMatch[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid footer sequence: %w", err)
-	}
-	eot := eotMatch[1] == "1"
-
-	x = strings.ReplaceAll(x, footerTag, "")
 	x = strings.TrimSpace(x)
 	x = strings.TrimPrefix(x, `<?xml version="1.0" encoding="utf-8"?>`)
 	x = strings.TrimSpace(x)

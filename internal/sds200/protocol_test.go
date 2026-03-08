@@ -79,8 +79,14 @@ func TestParseXMLFragment(t *testing.T) {
 			wantEOT: true,
 		},
 		{
-			name:    "missing_footer",
-			raw:     `GSI,<XML>,<?xml version="1.0" encoding="utf-8"?><ScannerInfo></ScannerInfo>` + "\r",
+			name:    "no_footer_complete_xml",
+			raw:     "GSI,<XML>,\r<?xml version=\"1.0\" encoding=\"utf-8\"?>\r<ScannerInfo Mode=\"Menu tree\" V_Screen=\"menu_selection\">\r  <MenuSummary name=\"Show IPs\" index=\"4293304272\" />\r  <ViewDescription>\r  </ViewDescription>\r</ScannerInfo>\r",
+			wantSeq: 1,
+			wantEOT: true,
+		},
+		{
+			name:    "missing_footer_incomplete",
+			raw:     `GSI,<XML>,<?xml version="1.0" encoding="utf-8"?><ScannerInfo>` + "\r",
 			wantErr: true,
 		},
 		{

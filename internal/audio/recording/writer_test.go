@@ -225,7 +225,7 @@ func TestFLACWriterAbort(t *testing.T) {
 	require.NoError(t, w.Abort())
 	_, err = os.Stat(tmpPath)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, os.ErrNotExist)
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestEncodeUTF8Uint64(t *testing.T) {

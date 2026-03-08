@@ -2,7 +2,7 @@ name: Tests - Main Push
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
 
 permissions:
   contents: read

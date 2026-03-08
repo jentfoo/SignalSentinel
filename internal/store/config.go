@@ -8,7 +8,7 @@ import (
 
 const CurrentVersion = 1
 
-// Document is the persisted runtime YAML payload.
+// Document is the persisted YAML payload for app-owned config and metadata.
 type Document struct {
 	Version int    `yaml:"version"`
 	Config  Config `yaml:"config"`
@@ -36,22 +36,32 @@ type RecordingConfig struct {
 	HangTimeSeconds int `yaml:"hang_time_seconds"`
 }
 
-// State contains app-managed persisted state that is not scanner live state.
+// State contains persisted, app-managed metadata and never scanner live state.
 type State struct {
-	Favorites []Favorite `yaml:"favorites"`
+	Favorites  []Favorite       `yaml:"favorites"`
+	Recordings []RecordingEntry `yaml:"recordings,omitempty"`
 }
 
+// Favorite is an app-level quick entry for operator navigation.
 type Favorite struct {
 	Name      string `yaml:"name"`
 	Frequency string `yaml:"frequency,omitempty"`
 	Channel   string `yaml:"channel,omitempty"`
 }
 
-// RuntimeRadioState represents live scanner state and is in-memory only.
-type RuntimeRadioState struct {
-	Connected   bool
-	Frequency   string
-	SquelchOpen bool
+// RecordingEntry is persisted metadata for finalized recordings.
+type RecordingEntry struct {
+	ID        string `yaml:"id"`
+	StartedAt string `yaml:"started_at"`
+	EndedAt   string `yaml:"ended_at"`
+	Duration  string `yaml:"duration"`
+	Frequency string `yaml:"frequency,omitempty"`
+	System    string `yaml:"system,omitempty"`
+	Channel   string `yaml:"channel,omitempty"`
+	Talkgroup string `yaml:"talkgroup,omitempty"`
+	FilePath  string `yaml:"file_path"`
+	FileSize  int64  `yaml:"file_size"`
+	Trigger   string `yaml:"trigger"`
 }
 
 func (d *Document) ApplyDefaults() {

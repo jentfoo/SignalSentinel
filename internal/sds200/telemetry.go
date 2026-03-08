@@ -172,6 +172,7 @@ type RuntimeStatus struct {
 	System      string
 	Department  string
 	Channel     string
+	Talkgroup   string
 	Hold        bool
 	Signal      int
 	SquelchOpen bool
@@ -252,12 +253,17 @@ func (s *TelemetryStore) UpdateFromScannerInfo(info ScannerInfo) RuntimeStatus {
 	if nodes := info.Nodes["ConvFrequency"]; len(nodes) > 0 {
 		cf := nodes[0]
 		s.status.Channel = cf["Name"]
+		s.status.Talkgroup = ""
 		s.status.Frequency = cf["Freq"]
 		s.status.System = extractName(info.Nodes["System"])
 		s.status.Department = extractName(info.Nodes["Department"])
 	} else if nodes := info.Nodes["TGID"]; len(nodes) > 0 {
 		tg := nodes[0]
 		s.status.Channel = tg["Name"]
+		s.status.Talkgroup = tg["TGID"]
+		if freq := tg["Freq"]; freq != "" {
+			s.status.Frequency = freq
+		}
 		s.status.System = extractName(info.Nodes["System"])
 		s.status.Department = extractName(info.Nodes["Department"])
 	}

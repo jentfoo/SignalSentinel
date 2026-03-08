@@ -227,6 +227,7 @@ func TestTelemetryStoreUpdateFromScannerInfoTGID(t *testing.T) {
 	assert.Equal(t, "County P25", updated.System)
 	assert.Equal(t, "Law Enforcement", updated.Department)
 	assert.Equal(t, "Dispatch 1", updated.Channel)
+	assert.Equal(t, "100", updated.Talkgroup)
 	assert.True(t, updated.Hold)
 	assert.Equal(t, 15, updated.Volume)
 	assert.Equal(t, 5, updated.Signal)

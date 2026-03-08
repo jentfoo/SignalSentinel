@@ -5,12 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
+	"github.com/google/renameio/v2"
 	"gopkg.in/yaml.v3"
 )
 
 type Store struct {
-	path string
+	path     string
+	pathOnce sync.Once
+	pathErr  error
 }
 
 func New(path string) *Store {
@@ -18,14 +22,29 @@ func New(path string) *Store {
 }
 
 func (s *Store) filePath() (string, error) {
-	if s.path == "" {
+	s.pathOnce.Do(func() {
+		if s.path != "" {
+			return
+		}
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "", fmt.Errorf("resolve user home: %w", err)
+			s.pathErr = fmt.Errorf("resolve user home: %w", err)
+			return
 		}
 		s.path = filepath.Join(home, ".sigsentinel", "config.yaml")
+	})
+	if s.pathErr != nil {
+		return "", s.pathErr
 	}
 	return s.path, nil
+}
+
+func (s *Store) Dir() (string, error) {
+	p, err := s.filePath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(p), nil
 }
 
 func (s *Store) Load() (*Document, error) {
@@ -48,9 +67,6 @@ func (s *Store) Load() (*Document, error) {
 		return nil, err
 	}
 	doc.ApplyDefaults() // fill any new defaults in
-	if err := doc.Validate(); err != nil {
-		return nil, err
-	}
 	return doc, nil
 }
 
@@ -72,21 +88,14 @@ func (s *Store) Save(doc *Document) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	return renameio.WriteFile(path, data, 0o644)
+}
 
-	tmp, err := os.CreateTemp(dir, "tmpcfg-*.yaml")
+func (s *Store) AppendRecording(entry RecordingEntry) error {
+	doc, err := s.Load()
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	} else if err := tmp.Close(); err != nil {
-		return err
-	} else if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	return nil
+	doc.State.Recordings = append(doc.State.Recordings, entry)
+	return s.Save(doc)
 }

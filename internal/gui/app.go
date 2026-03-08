@@ -1,1 +1,1 @@
-package fyne
+package gui

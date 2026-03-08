@@ -27,9 +27,6 @@ func main() {
 		log.Printf("fatal: %v", err)
 		os.Exit(2)
 	}
-	if opts.ShowHelp {
-		return
-	}
 
 	if err := run(opts); err != nil {
 		log.Printf("fatal: %v", err)
@@ -38,6 +35,9 @@ func main() {
 }
 
 func run(opts cliFlags) error {
+	if opts.ShowHelp {
+		return nil // already shown
+	}
 	if err := persistCLIOverrides(opts); err != nil {
 		return fmt.Errorf("startup: %w", err)
 	}

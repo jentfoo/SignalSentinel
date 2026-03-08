@@ -4,62 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
-	"github.com/jentfoo/SignalSentinel/internal/sds200"
 	"github.com/jentfoo/SignalSentinel/internal/store"
 )
 
 type Options struct {
-	ConfigPath          string
-	Logger              *log.Logger
-	ResponseTimeout     time.Duration
-	Retries             int
-	ReadTimeout         time.Duration
-	WriteTimeout        time.Duration
-	PushIntervalMS      int
-	HealthCheckInterval time.Duration
-	ReconnectDelay      time.Duration
-	MaxReconnectFails   int
-	ClientFactory       SDS200Factory
-}
-
-func (o Options) withDefaults() Options {
-	if o.Logger == nil {
-		o.Logger = log.New(os.Stderr, "", log.LstdFlags|log.LUTC)
-	}
-	if o.ResponseTimeout == 0 {
-		o.ResponseTimeout = 2 * time.Second
-	}
-	if o.Retries <= 0 {
-		o.Retries = 3
-	}
-	if o.ReadTimeout == 0 {
-		o.ReadTimeout = o.ResponseTimeout
-	}
-	if o.WriteTimeout == 0 {
-		o.WriteTimeout = o.ResponseTimeout
-	}
-	if o.PushIntervalMS <= 0 {
-		o.PushIntervalMS = 1000
-	}
-	if o.HealthCheckInterval == 0 {
-		o.HealthCheckInterval = 20 * time.Second
-	}
-	if o.ReconnectDelay == 0 {
-		o.ReconnectDelay = 3 * time.Second
-	}
-	if o.MaxReconnectFails <= 0 {
-		o.MaxReconnectFails = 5
-	}
-	if o.ClientFactory == nil {
-		o.ClientFactory = defaultClientFactory
-	}
-	return o
+	ConfigPath string
+	Session    SessionConfig
 }
 
 type Runtime struct {
@@ -238,8 +192,6 @@ func cloneDocument(doc *store.Document) *store.Document {
 }
 
 func StartRuntime(ctx context.Context, opts Options) (*Runtime, error) {
-	opts = opts.withDefaults()
-
 	s := store.New(opts.ConfigPath)
 	doc, err := s.Load()
 	if err != nil {
@@ -256,23 +208,11 @@ func StartRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 		return nil, fmt.Errorf("validate recordings path: %w", err)
 	}
 
-	scannerCfg := SessionConfig{
-		Address:             doc.Config.Scanner.IP,
-		ControlPort:         doc.Config.Scanner.ControlPort,
-		ResponseTimeout:     opts.ResponseTimeout,
-		Retries:             opts.Retries,
-		ReadTimeout:         opts.ReadTimeout,
-		WriteTimeout:        opts.WriteTimeout,
-		PushIntervalMS:      opts.PushIntervalMS,
-		HealthCheckInterval: opts.HealthCheckInterval,
-		ReconnectDelay:      opts.ReconnectDelay,
-		MaxReconnectFails:   opts.MaxReconnectFails,
-		Logger:              opts.Logger,
-		Factory:             opts.ClientFactory,
-	}
+	sessionCfg := opts.Session
+	sessionCfg.Scanner = doc.Config.Scanner
 
 	hub := newStateHub()
-	session, err := NewScannerSession(ctx, scannerCfg, hub)
+	session, err := NewScannerSession(ctx, sessionCfg, hub)
 	if err != nil {
 		return nil, fmt.Errorf("start scanner session: %w", err)
 	}
@@ -285,10 +225,6 @@ func StartRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 		state:          hub,
 		recordingsPath: recordingsPath,
 	}, nil
-}
-
-func defaultClientFactory(cfg sds200.ClientConfig) (SDS200Client, error) {
-	return sds200.NewClient(cfg)
 }
 
 func resolveRecordingsPath(doc *store.Document, s *store.Store) (string, error) {

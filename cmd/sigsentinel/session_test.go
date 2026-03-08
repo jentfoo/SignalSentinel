@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jentfoo/SignalSentinel/internal/sds200"
+	"github.com/jentfoo/SignalSentinel/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -133,6 +134,23 @@ type fakeClientSnapshot struct {
 	hasTelemetry   bool
 }
 
+func TestSessionConfigWithDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg := SessionConfig{}.withDefaults()
+	assert.Equal(t, sds200.DefaultControlPort, cfg.Scanner.ControlPort)
+	assert.Equal(t, 2*time.Second, cfg.ResponseTimeout)
+	assert.Equal(t, 3, cfg.Retries)
+	assert.Equal(t, 2*time.Second, cfg.ReadTimeout)
+	assert.Equal(t, 2*time.Second, cfg.WriteTimeout)
+	assert.Equal(t, 1000, cfg.PushIntervalMS)
+	assert.Equal(t, 20*time.Second, cfg.HealthCheckInterval)
+	assert.Equal(t, 3*time.Second, cfg.ReconnectDelay)
+	assert.Equal(t, 5, cfg.MaxReconnectFails)
+	require.NotNil(t, cfg.Logger)
+	require.NotNil(t, cfg.Factory)
+}
+
 func TestNewScannerSession(t *testing.T) {
 	t.Parallel()
 
@@ -145,19 +163,11 @@ func TestNewScannerSession(t *testing.T) {
 		assert.Equal(t, "scanner address is required", err.Error())
 	})
 
-	t.Run("requires_client_factory", func(t *testing.T) {
-		session, err := NewScannerSession(t.Context(), SessionConfig{Address: "127.0.0.1"}, newStateHub())
-		require.Error(t, err)
-		assert.Nil(t, session)
-		assert.Equal(t, "scanner factory is required", err.Error())
-	})
-
 	t.Run("connects_and_starts_push", func(t *testing.T) {
 		client := &fakeSDS200Client{resyncStatus: sds200.RuntimeStatus{Connected: true, Channel: "ops"}}
 		hub := newStateHub()
 		session, err := NewScannerSession(t.Context(), SessionConfig{
-			Address:        "127.0.0.1",
-			ControlPort:    sds200.DefaultControlPort,
+			Scanner:        store.ScannerConfig{IP: "127.0.0.1", ControlPort: sds200.DefaultControlPort},
 			PushIntervalMS: 1200,
 			Factory: func(cfg sds200.ClientConfig) (SDS200Client, error) {
 				return client, nil

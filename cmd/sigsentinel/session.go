@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/jentfoo/SignalSentinel/internal/sds200"
+	"github.com/jentfoo/SignalSentinel/internal/store"
 )
 
 type SDS200Client interface {
@@ -24,8 +26,7 @@ type SDS200Client interface {
 type SDS200Factory func(sds200.ClientConfig) (SDS200Client, error)
 
 type SessionConfig struct {
-	Address             string
-	ControlPort         int
+	Scanner             store.ScannerConfig
 	ResponseTimeout     time.Duration
 	Retries             int
 	ReadTimeout         time.Duration
@@ -36,6 +37,47 @@ type SessionConfig struct {
 	MaxReconnectFails   int
 	Logger              *log.Logger
 	Factory             SDS200Factory
+}
+
+func defaultClientFactory(cfg sds200.ClientConfig) (SDS200Client, error) {
+	return sds200.NewClient(cfg)
+}
+
+func (c SessionConfig) withDefaults() SessionConfig {
+	if c.Scanner.ControlPort == 0 {
+		c.Scanner.ControlPort = sds200.DefaultControlPort
+	}
+	if c.ResponseTimeout == 0 {
+		c.ResponseTimeout = 2 * time.Second
+	}
+	if c.Retries <= 0 {
+		c.Retries = 3
+	}
+	if c.ReadTimeout == 0 {
+		c.ReadTimeout = c.ResponseTimeout
+	}
+	if c.WriteTimeout == 0 {
+		c.WriteTimeout = c.ResponseTimeout
+	}
+	if c.PushIntervalMS <= 0 {
+		c.PushIntervalMS = 1000
+	}
+	if c.HealthCheckInterval <= 0 {
+		c.HealthCheckInterval = 20 * time.Second
+	}
+	if c.ReconnectDelay <= 0 {
+		c.ReconnectDelay = 3 * time.Second
+	}
+	if c.MaxReconnectFails <= 0 {
+		c.MaxReconnectFails = 5
+	}
+	if c.Logger == nil {
+		c.Logger = log.New(os.Stderr, "", log.LstdFlags|log.LUTC)
+	}
+	if c.Factory == nil {
+		c.Factory = defaultClientFactory
+	}
+	return c
 }
 
 type ScannerSession struct {
@@ -64,35 +106,9 @@ const (
 )
 
 func NewScannerSession(parent context.Context, cfg SessionConfig, hub *stateHub) (*ScannerSession, error) {
-	if cfg.Address == "" {
+	cfg = cfg.withDefaults()
+	if cfg.Scanner.IP == "" {
 		return nil, errors.New("scanner address is required")
-	}
-	if cfg.ControlPort == 0 {
-		cfg.ControlPort = sds200.DefaultControlPort
-	}
-	if cfg.ResponseTimeout == 0 {
-		cfg.ResponseTimeout = 2 * time.Second
-	}
-	if cfg.Retries <= 0 {
-		cfg.Retries = 3
-	}
-	if cfg.ReadTimeout == 0 {
-		cfg.ReadTimeout = cfg.ResponseTimeout
-	}
-	if cfg.WriteTimeout == 0 {
-		cfg.WriteTimeout = cfg.ResponseTimeout
-	}
-	if cfg.HealthCheckInterval <= 0 {
-		cfg.HealthCheckInterval = 20 * time.Second
-	}
-	if cfg.ReconnectDelay <= 0 {
-		cfg.ReconnectDelay = 3 * time.Second
-	}
-	if cfg.MaxReconnectFails <= 0 {
-		cfg.MaxReconnectFails = 5
-	}
-	if cfg.Factory == nil {
-		return nil, errors.New("scanner factory is required")
 	}
 
 	ctx, cancel := context.WithCancel(parent)
@@ -205,8 +221,8 @@ func (s *ScannerSession) healthCheck() error {
 
 func (s *ScannerSession) connectAndSync() error {
 	client, err := s.cfg.Factory(sds200.ClientConfig{
-		Address:         s.cfg.Address,
-		ControlPort:     s.cfg.ControlPort,
+		Address:         s.cfg.Scanner.IP,
+		ControlPort:     s.cfg.Scanner.ControlPort,
 		ResponseTimeout: s.cfg.ResponseTimeout,
 		Retries:         s.cfg.Retries,
 		ReadTimeout:     s.cfg.ReadTimeout,

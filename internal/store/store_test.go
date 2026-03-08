@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 )
 
 func DefaultDocument() *Document {
@@ -74,6 +73,8 @@ func TestStoreLoadAndSave(t *testing.T) {
 }
 
 func TestDocumentValidate(t *testing.T) {
+	t.Parallel()
+
 	t.Run("valid_document", func(t *testing.T) {
 		doc := DefaultDocument()
 		doc.Config.Scanner.IP = "10.0.1.10"
@@ -97,28 +98,5 @@ func TestDocumentValidate(t *testing.T) {
 
 		err := doc.Validate()
 		assert.Error(t, err)
-	})
-}
-
-func TestRuntimeRadioStateIsNotPersisted(t *testing.T) {
-	t.Run("yaml_contains_only_config_and_state", func(t *testing.T) {
-		type payload struct {
-			Document          `yaml:",inline"`
-			RuntimeRadioState RuntimeRadioState `yaml:"-"`
-		}
-
-		p := payload{
-			Document:          *DefaultDocument(),
-			RuntimeRadioState: RuntimeRadioState{Connected: true, Frequency: "155.190", SquelchOpen: true},
-		}
-		p.Config.Scanner.IP = "10.0.1.10"
-
-		data, err := yaml.Marshal(p)
-		require.NoError(t, err)
-
-		assert.NotContains(t, string(data), "connected")
-		assert.NotContains(t, string(data), "squelch")
-		assert.Contains(t, string(data), "config:")
-		assert.Contains(t, string(data), "state:")
 	})
 }

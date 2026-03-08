@@ -905,10 +905,13 @@ These commands are present in the [SDS Series Remote Command Specification V2.00
 **GW2** -- Get Waterfall FFT Information (Binary, no separator)
 
 Like GWF but returns FFT data as 240 binary values (no comma separators).
+GW2 is not a separate wire command — it uses the same `GWF` request. Newer
+firmware may label the response as `GW2` instead of `GWF`; implementations
+should accept both.
 
 ```
 Request:   GWF,[TYPE],[ON/OFF]\r
-Response:  GWF,[FFT_DATA]\r
+Response:  GWF,[FFT_DATA]\r  (or GW2,[FFT_DATA]\r on newer firmware)
 
 TYPE: 1 = Displayed FFT (240 data points, binary)
 ```

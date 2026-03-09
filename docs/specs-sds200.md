@@ -584,6 +584,15 @@ Set:   DTM,[DayLightSaving],[YYYY],[MM],[DD],[hh],[mm],[ss]\r
 RTC Status: 0 = RTC NG, 1 = RTC OK
 ```
 
+Implementation note (observed on SDS200 firmware in the field): `DTM` **Get**
+responses may return month/day/time parts without zero-padding. Example:
+`DTM,1,2026,3,9,7,51,9,1`.
+
+- Clients should parse `MM`,`DD`,`hh`,`mm`,`ss` as integer fields (accept both
+  one-digit and two-digit values).
+- For `DTM` Set requests, continue sending zero-padded values (`01`-`12`,
+  `00`-`59`) for maximum compatibility.
+
 **LCR** -- Get/Set Location and Range
 
 ```

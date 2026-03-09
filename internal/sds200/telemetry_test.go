@@ -239,7 +239,7 @@ func TestTelemetryStoreUpdateFromScannerInfoTGID(t *testing.T) {
 				"Mute": "Unmute",
 			},
 			Nodes: map[string][]map[string]string{
-				"System":     {{"Name": "County P25"}},
+				"System":     {{"Name": "County P25", "Index": "5"}},
 				"Department": {{"Name": "Law Enforcement"}},
 				"TGID":       {{"Name": "Dispatch 1", "TGID": "100", "Site": "2", "Hold": "On", "Avoid": "T-Avoid"}},
 			},
@@ -256,8 +256,30 @@ func TestTelemetryStoreUpdateFromScannerInfoTGID(t *testing.T) {
 		assert.Equal(t, "TGID", updated.HoldTarget.Keyword)
 		assert.Equal(t, "100", updated.HoldTarget.Arg1)
 		assert.Equal(t, "2", updated.HoldTarget.Arg2)
+		assert.Equal(t, "5", updated.HoldTarget.SystemIndex)
 		assert.True(t, updated.AvoidKnown)
 		assert.True(t, updated.Avoided)
+	})
+
+	t.Run("trunked_tgid_uses_department_system_index_fallback", func(t *testing.T) {
+		store := NewTelemetryStore()
+		info := ScannerInfo{
+			Mode:    "Scan Mode",
+			VScreen: "trunk_scan",
+			Property: map[string]string{
+				"Mute": "Unmute",
+			},
+			Nodes: map[string][]map[string]string{
+				"System":     {{"Name": "County P25"}},
+				"Department": {{"Name": "Unknown", "SystemIndex": "7"}},
+				"TGID":       {{"Name": "Dispatch 1", "TGID": "100", "Site": "2", "Hold": "On"}},
+			},
+		}
+
+		updated := store.UpdateFromScannerInfo(info)
+		assert.Equal(t, "TGID", updated.HoldTarget.Keyword)
+		assert.Equal(t, "100", updated.HoldTarget.Arg1)
+		assert.Equal(t, "7", updated.HoldTarget.SystemIndex)
 	})
 }
 

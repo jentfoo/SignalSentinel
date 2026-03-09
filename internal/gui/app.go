@@ -52,10 +52,15 @@ func Run(ctx context.Context, deps Dependencies) error {
 
 	initialRecordings, loadErr := deps.LoadRecordings()
 	model := &uiModel{
-		state:        deps.InitialState,
-		recordings:   initialRecordings,
-		selectedClip: -1,
-		activity:     normalizeActivitySettings(deps.InitialSettings.Activity),
+		state:                  deps.InitialState,
+		recordings:             initialRecordings,
+		selectedClip:           -1,
+		selectedIDs:            make(map[string]struct{}),
+		selectionAnchor:        -1,
+		activity:               normalizeActivitySettings(deps.InitialSettings.Activity),
+		monitorListenAvailable: deps.SetMonitorListen != nil,
+		monitorMuteAvailable:   deps.SetMonitorMute != nil,
+		monitorApplyAvailable:  deps.SetMonitorGain != nil || deps.SetMonitorOutputDevice != nil,
 	}
 	if loadErr != nil {
 		model.recordingsErr = loadErr.Error()
@@ -184,6 +189,33 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	squelchEntry.SetText("5")
 	qshFreqField := container.NewGridWrap(fyne.NewSize(140, qshFreqEntry.MinSize().Height), qshFreqEntry)
 	startRecButton := widget.NewButton("Start Recording", nil)
+	monitorListenButton := widget.NewButton("Listen", nil)
+	monitorMuteButton := widget.NewButton("Mute", nil)
+	monitorGainEntry := widget.NewEntry()
+	monitorGainEntry.SetText(fmt.Sprintf("%.1f", model.state.Monitor.GainDB))
+	monitorOutputOptions := []string{"system-default"}
+	if deps.ListMonitorOutputDevices != nil {
+		if options, err := deps.ListMonitorOutputDevices(); err == nil && len(options) > 0 {
+			monitorOutputOptions = dedupeMonitorOptions(options)
+		}
+	}
+	monitorOutputSelect := widget.NewSelect(monitorOutputOptions, nil)
+	monitorOutputDevice := strings.TrimSpace(model.state.Monitor.OutputDevice)
+	if monitorOutputDevice == "" {
+		monitorOutputDevice = "system-default"
+	}
+	if !containsString(monitorOutputOptions, monitorOutputDevice) {
+		monitorOutputOptions = append(monitorOutputOptions, monitorOutputDevice)
+		monitorOutputSelect.Options = dedupeMonitorOptions(monitorOutputOptions)
+	}
+	monitorOutputSelect.SetSelected(monitorOutputDevice)
+	monitorApplyButton := widget.NewButton("Apply Monitor Settings", nil)
+	monitorStatusLabel := widget.NewLabel("-")
+	monitorErrorLabel := widget.NewLabel("-")
+	monitorErrorLabel.Wrapping = fyne.TextWrapWord
+	monitorListenAvailable := deps.SetMonitorListen != nil
+	monitorMuteAvailable := deps.SetMonitorMute != nil
+	monitorApplyAvailable := deps.SetMonitorGain != nil || deps.SetMonitorOutputDevice != nil
 	holdButton.Disable()
 	nextButton.Disable()
 	previousButton.Disable()
@@ -195,6 +227,9 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	setVolumeButton.Disable()
 	setSquelchButton.Disable()
 	startRecButton.Disable()
+	monitorListenButton.Disable()
+	monitorMuteButton.Disable()
+	monitorApplyButton.Disable()
 
 	applyControlResult := func(result ControlResult) {
 		commandAction.SetText(orDash(result.Action) + " (" + orDash(result.Command) + ")")
@@ -434,6 +469,84 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 			})
 		}()
 	}
+	setMonitorButtonsEnabled := func(enabled bool) {
+		setEnabled(monitorListenButton, enabled && monitorListenAvailable)
+		setEnabled(monitorMuteButton, enabled && monitorMuteAvailable)
+		setEnabled(monitorApplyButton, enabled && monitorApplyAvailable)
+	}
+	runMonitorAction := func(action func() error) {
+		model.mu.Lock()
+		if model.pendingMonitorAction {
+			model.mu.Unlock()
+			return
+		}
+		model.pendingMonitorAction = true
+		model.mu.Unlock()
+		setMonitorButtonsEnabled(false)
+		go func() {
+			err := action()
+			fyne.Do(func() {
+				model.mu.Lock()
+				model.pendingMonitorAction = false
+				model.mu.Unlock()
+				setMonitorButtonsEnabled(true)
+				if err != nil {
+					dialog.ShowError(err, window)
+				}
+			})
+		}()
+	}
+	monitorListenButton.OnTapped = func() {
+		if !monitorListenAvailable {
+			return
+		}
+		model.mu.Lock()
+		next := !model.state.Monitor.Enabled
+		model.mu.Unlock()
+		runMonitorAction(func() error {
+			return deps.SetMonitorListen(next)
+		})
+	}
+	monitorMuteButton.OnTapped = func() {
+		if !monitorMuteAvailable {
+			return
+		}
+		model.mu.Lock()
+		next := !model.state.Monitor.Muted
+		model.mu.Unlock()
+		runMonitorAction(func() error {
+			return deps.SetMonitorMute(next)
+		})
+	}
+	monitorApplyButton.OnTapped = func() {
+		if !monitorApplyAvailable {
+			return
+		}
+		gainText := strings.TrimSpace(monitorGainEntry.Text)
+		if gainText == "" {
+			gainText = "0"
+		}
+		gainValue, err := strconv.ParseFloat(gainText, 64)
+		if err != nil {
+			dialog.ShowError(errors.New("monitor gain must be a number"), window)
+			return
+		}
+		outputDevice := strings.TrimSpace(monitorOutputSelect.Selected)
+		if outputDevice == "" {
+			outputDevice = "system-default"
+		}
+		runMonitorAction(func() error {
+			var applyErr error
+			if deps.SetMonitorGain != nil {
+				applyErr = deps.SetMonitorGain(gainValue)
+			}
+			if applyErr == nil && deps.SetMonitorOutputDevice != nil {
+				applyErr = deps.SetMonitorOutputDevice(outputDevice)
+			}
+			return applyErr
+		})
+	}
+	setMonitorButtonsEnabled(true)
 
 	views.connectionLabel = connectionLabel
 	views.modeLabel = modeLabel
@@ -474,6 +587,13 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	views.volumeEntry = volumeEntry
 	views.squelchEntry = squelchEntry
 	views.startRecButton = startRecButton
+	views.monitorListenButton = monitorListenButton
+	views.monitorMuteButton = monitorMuteButton
+	views.monitorGainEntry = monitorGainEntry
+	views.monitorOutputSelect = monitorOutputSelect
+	views.monitorApplyButton = monitorApplyButton
+	views.monitorStatusLabel = monitorStatusLabel
+	views.monitorErrorLabel = monitorErrorLabel
 
 	commandField := func(label string, value *widget.Label) fyne.CanvasObject {
 		labelWidget := widget.NewLabel(label)
@@ -523,6 +643,20 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	))
 
 	controls := container.NewVBox(
+		widget.NewLabel("Live Monitor"),
+		container.NewHBox(monitorListenButton, monitorMuteButton, startRecButton),
+		container.NewHBox(
+			widget.NewLabel("Gain dB"),
+			container.NewGridWrap(fyne.NewSize(100, monitorGainEntry.MinSize().Height), monitorGainEntry),
+			widget.NewLabel("Output"),
+			container.NewGridWrap(fyne.NewSize(220, monitorOutputSelect.MinSize().Height), monitorOutputSelect),
+			monitorApplyButton,
+		),
+		widget.NewForm(
+			statusField("Monitor", monitorStatusLabel),
+			statusField("Last Error", monitorErrorLabel),
+		),
+		widget.NewSeparator(),
 		widget.NewLabel("Scanner Control"),
 		container.NewHBox(holdButton, nextButton, previousButton, avoidButton),
 		container.NewHBox(
@@ -551,9 +685,6 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 		widget.NewSeparator(),
 		availabilityPanel,
 		commandPanel,
-		widget.NewSeparator(),
-		widget.NewLabel("Recording Control"),
-		container.NewHBox(startRecButton),
 	)
 	controlsScroll := container.NewVScroll(controls)
 	statusSplit := container.NewHSplit(container.NewPadded(statusSummary), controlsScroll)
@@ -1075,50 +1206,139 @@ func buildActivityLists(model *uiModel) (*widget.List, *widget.List) {
 }
 
 func buildRecordingsPanel(model *uiModel, deps Dependencies, window fyne.Window, views *uiViews) (fyne.CanvasObject, func()) {
-	recordingsList := widget.NewList(
+	var recordingsList *widget.List
+	var stopButton *widget.Button
+	var playButton *widget.Button
+	var deleteButton *widget.Button
+	selectRecording := func(id widget.ListItemID) {
+		model.mu.Lock()
+		if model.recordingsListSyncing {
+			model.mu.Unlock()
+			return
+		}
+		ensureRecordingSelectionLocked(model)
+		modifier := fyne.KeyModifier(model.lastSelectionModifier)
+		model.lastSelectionModifier = 0
+
+		if id < 0 || id >= len(model.recordings) {
+			clearRecordingSelectionLocked(model)
+			model.mu.Unlock()
+			playButton.Disable()
+			deleteButton.Disable()
+			recordingsList.Refresh()
+			return
+		}
+
+		clicked := model.recordings[id]
+		shift := modifier&fyne.KeyModifierShift != 0
+		toggle := modifier&fyne.KeyModifierControl != 0 || modifier&fyne.KeyModifierSuper != 0
+
+		switch {
+		case shift:
+			anchor := model.selectionAnchor
+			if anchor < 0 || anchor >= len(model.recordings) {
+				if model.selectedClip >= 0 && model.selectedClip < len(model.recordings) {
+					anchor = model.selectedClip
+				} else {
+					anchor = id
+				}
+			}
+			if !toggle {
+				for current := range model.selectedIDs {
+					delete(model.selectedIDs, current)
+				}
+			}
+			start := anchor
+			end := id
+			if start > end {
+				start, end = end, start
+			}
+			for i := start; i <= end; i++ {
+				model.selectedIDs[model.recordings[i].ID] = struct{}{}
+			}
+			model.selectedClip = id
+			model.selectedID = clicked.ID
+			model.selectionAnchor = anchor
+		case toggle:
+			if _, ok := model.selectedIDs[clicked.ID]; ok {
+				delete(model.selectedIDs, clicked.ID)
+				if model.selectedID == clicked.ID || model.selectedClip == id {
+					model.selectedClip = -1
+					model.selectedID = ""
+				}
+			} else {
+				model.selectedIDs[clicked.ID] = struct{}{}
+				model.selectedClip = id
+				model.selectedID = clicked.ID
+			}
+			model.selectionAnchor = id
+		default:
+			for current := range model.selectedIDs {
+				delete(model.selectedIDs, current)
+			}
+			model.selectedIDs[clicked.ID] = struct{}{}
+			model.selectedClip = id
+			model.selectedID = clicked.ID
+			model.selectionAnchor = id
+		}
+
+		syncPrimarySelectionLocked(model)
+		primary := model.selectedClip
+		selectedCount := len(model.selectedIDs)
+		model.recordingsListSyncing = true
+		model.mu.Unlock()
+
+		recordingsList.Refresh()
+		if selectedCount == 0 {
+			recordingsList.UnselectAll()
+		} else if primary >= 0 && primary != id {
+			recordingsList.Select(primary)
+		}
+
+		model.mu.Lock()
+		model.recordingsListSyncing = false
+		model.mu.Unlock()
+
+		setEnabled(playButton, primary >= 0)
+		setEnabled(deleteButton, selectedCount > 0)
+	}
+	recordingsList = widget.NewList(
 		func() int {
 			model.mu.Lock()
 			defer model.mu.Unlock()
 			return len(model.recordings)
 		},
 		func() fyne.CanvasObject {
-			return widget.NewLabel("")
+			return newRecordingsListItem(
+				func(modifier fyne.KeyModifier) {
+					model.mu.Lock()
+					model.lastSelectionModifier = int(modifier)
+					model.mu.Unlock()
+				},
+				func(id widget.ListItemID) {
+					if recordingsList == nil {
+						return
+					}
+					recordingsList.Select(id)
+				},
+			)
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			label := obj.(*widget.Label)
+			row := obj.(*recordingsListItem)
+			row.SetID(id)
 			model.mu.Lock()
 			defer model.mu.Unlock()
 			if id < 0 || id >= len(model.recordings) {
-				label.SetText("")
+				row.SetText("")
+				row.SetSelected(false)
 				return
 			}
 			rec := model.recordings[id]
-			label.SetText(formatRecording(rec))
+			row.SetText(formatRecording(rec))
+			row.SetSelected(isRecordingSelectedLocked(model, id, rec.ID))
 		},
 	)
-	var stopButton *widget.Button
-	var playButton *widget.Button
-	var deleteButton *widget.Button
-	recordingsList.OnSelected = func(id widget.ListItemID) {
-		model.mu.Lock()
-		model.selectedClip = id
-		model.selectedID = ""
-		if id >= 0 && id < len(model.recordings) {
-			model.selectedID = model.recordings[id].ID
-		}
-		model.mu.Unlock()
-		playButton.Enable()
-		deleteButton.Enable()
-	}
-	recordingsList.OnUnselected = func(id widget.ListItemID) {
-		_ = id
-		model.mu.Lock()
-		model.selectedClip = -1
-		model.selectedID = ""
-		model.mu.Unlock()
-		playButton.Disable()
-		deleteButton.Disable()
-	}
+	recordingsList.OnSelected = selectRecording
 	recordingsErrLabel := widget.NewLabel("")
 	recordingsErrLabel.Hide()
 	if model.recordingsErr != "" {
@@ -1181,46 +1401,66 @@ func buildRecordingsPanel(model *uiModel, deps Dependencies, window fyne.Window,
 	})
 	stopButton.Disable()
 
-	deleteButton = widget.NewButton("Delete", func() {
+	deleteButton = widget.NewButton("Delete Selected", func() {
 		model.mu.Lock()
-		idx := model.selectedClip
-		var rec Recording
-		if idx >= 0 && idx < len(model.recordings) {
-			rec = model.recordings[idx]
-		} else {
-			idx = -1
+		targetIDs := orderedSelectedRecordingIDsLocked(model)
+		if len(targetIDs) == 0 && model.selectedClip >= 0 && model.selectedClip < len(model.recordings) {
+			targetIDs = []string{model.recordings[model.selectedClip].ID}
+		}
+		var primaryRec Recording
+		if len(targetIDs) == 1 {
+			targetID := targetIDs[0]
+			for i := range model.recordings {
+				if model.recordings[i].ID == targetID {
+					primaryRec = model.recordings[i]
+					break
+				}
+			}
 		}
 		model.mu.Unlock()
-		if idx < 0 {
-			dialog.ShowInformation("Delete", "Select a recording first.", window)
+		if len(targetIDs) == 0 {
+			dialog.ShowInformation("Delete", "Select one or more recordings first.", window)
 			return
 		}
-		name := filepath.Base(rec.FilePath)
-		if strings.TrimSpace(name) == "." || strings.TrimSpace(name) == "" {
-			name = rec.ID
+
+		title := "Delete Recording"
+		var message string
+		if len(targetIDs) == 1 {
+			name := filepath.Base(primaryRec.FilePath)
+			if strings.TrimSpace(name) == "." || strings.TrimSpace(name) == "" {
+				name = primaryRec.ID
+			}
+			if strings.TrimSpace(name) == "" {
+				name = targetIDs[0]
+			}
+			message = fmt.Sprintf("Delete recording %q?", name)
+		} else {
+			title = "Delete Recordings"
+			message = fmt.Sprintf("Delete %d selected recordings?", len(targetIDs))
 		}
-		dialog.ShowConfirm("Delete Recording", fmt.Sprintf("Delete recording %q?", name), func(ok bool) {
+		dialog.ShowConfirm(title, message, func(ok bool) {
 			if !ok {
 				return
 			}
 			deleteButton.Disable()
-			go func(target Recording) {
-				report, err := deps.DeleteRecordings([]string{target.ID})
+			go func(ids []string) {
+				report, err := deps.DeleteRecordings(ids)
 				recs, loadErr := deps.LoadRecordings()
 				fyne.Do(func() {
-					deleteButton.Enable()
 					applyRecordingsLoadResult(model, recordingsList, recordingsErrLabel, playButton, deleteButton, recs, loadErr, true)
 					if err != nil {
 						dialog.ShowError(err, window)
 						return
 					}
 					if len(report.Failed) > 0 {
-						dialog.ShowInformation("Delete", report.Failed[0].Message, window)
-						return
+						summary := fmt.Sprintf("Deleted %d of %d recordings. %d failed.", len(report.Deleted), len(ids), len(report.Failed))
+						if strings.TrimSpace(report.Failed[0].Message) != "" {
+							summary += " " + report.Failed[0].Message
+						}
+						dialog.ShowInformation("Delete", summary, window)
 					}
-					dialog.ShowInformation("Delete", "Recording deleted.", window)
 				})
-			}(rec)
+			}(append([]string(nil), targetIDs...))
 		}, window)
 	})
 	deleteButton.Disable()
@@ -1250,15 +1490,47 @@ func buildSettingsPanel(deps Dependencies, window fyne.Window) fyne.CanvasObject
 	pathEntry := widget.NewEntry()
 	pathEntry.SetText(deps.InitialSettings.RecordingsPath)
 	hangLabel := widget.NewLabel(fmt.Sprintf("%ds", deps.InitialSettings.HangTimeSeconds))
+	monitorDefaultCheck := widget.NewCheck("Enable listen on startup", nil)
+	monitorDefaultCheck.SetChecked(deps.InitialSettings.AudioMonitorDefaultEnabled)
+	monitorGainEntry := widget.NewEntry()
+	monitorGainEntry.SetText(fmt.Sprintf("%.1f", deps.InitialSettings.AudioMonitorGainDB))
+	monitorOutputOptions := []string{"system-default"}
+	if deps.ListMonitorOutputDevices != nil {
+		if options, err := deps.ListMonitorOutputDevices(); err == nil && len(options) > 0 {
+			monitorOutputOptions = dedupeMonitorOptions(options)
+		}
+	}
+	monitorOutputSelect := widget.NewSelect(monitorOutputOptions, nil)
+	currentOutputDevice := strings.TrimSpace(deps.InitialSettings.AudioMonitorOutputDevice)
+	if currentOutputDevice == "" {
+		currentOutputDevice = "system-default"
+	}
+	if !containsString(monitorOutputOptions, currentOutputDevice) {
+		monitorOutputOptions = append(monitorOutputOptions, currentOutputDevice)
+		monitorOutputSelect.Options = dedupeMonitorOptions(monitorOutputOptions)
+	}
+	monitorOutputSelect.SetSelected(currentOutputDevice)
 	currentScannerIP := strings.TrimSpace(deps.InitialSettings.ScannerIP)
 
 	saveSettings := widget.NewButton("Save Settings", nil)
 	saveSettings.OnTapped = func() {
+		gainText := strings.TrimSpace(monitorGainEntry.Text)
+		if gainText == "" {
+			gainText = "0"
+		}
+		gainValue, parseErr := strconv.ParseFloat(gainText, 64)
+		if parseErr != nil {
+			dialog.ShowError(errors.New("audio monitor gain must be a number"), window)
+			return
+		}
 		settings := Settings{
-			ScannerIP:       strings.TrimSpace(ipEntry.Text),
-			RecordingsPath:  strings.TrimSpace(pathEntry.Text),
-			HangTimeSeconds: deps.InitialSettings.HangTimeSeconds,
-			HangTimeChanged: false, // v1 settings view displays hang-time but does not edit it.
+			ScannerIP:                  strings.TrimSpace(ipEntry.Text),
+			RecordingsPath:             strings.TrimSpace(pathEntry.Text),
+			HangTimeSeconds:            deps.InitialSettings.HangTimeSeconds,
+			HangTimeChanged:            false, // v1 settings view displays hang-time but does not edit it.
+			AudioMonitorDefaultEnabled: monitorDefaultCheck.Checked,
+			AudioMonitorOutputDevice:   strings.TrimSpace(monitorOutputSelect.Selected),
+			AudioMonitorGainDB:         gainValue,
 		}
 		restartRequired := settings.ScannerIP != currentScannerIP
 		saveSettings.Disable()
@@ -1282,8 +1554,40 @@ func buildSettingsPanel(deps Dependencies, window fyne.Window) fyne.CanvasObject
 		widget.NewFormItem("Scanner IP", ipEntry),
 		widget.NewFormItem("Recordings Path", pathEntry),
 		widget.NewFormItem("Hang-Time", hangLabel),
+		widget.NewFormItem("Audio Monitor", monitorDefaultCheck),
+		widget.NewFormItem("Monitor Gain (dB)", monitorGainEntry),
+		widget.NewFormItem("Monitor Output Device", monitorOutputSelect),
 	)
 	return container.NewVBox(settingsForm, saveSettings)
+}
+
+func dedupeMonitorOptions(options []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(options))
+	for _, option := range options {
+		option = strings.TrimSpace(option)
+		if option == "" {
+			continue
+		}
+		if _, ok := seen[option]; ok {
+			continue
+		}
+		seen[option] = struct{}{}
+		out = append(out, option)
+	}
+	if len(out) == 0 {
+		return []string{"system-default"}
+	}
+	return out
+}
+
+func containsString(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }
 
 func parseIntEntry(name string, entry *widget.Entry) (int, error) {

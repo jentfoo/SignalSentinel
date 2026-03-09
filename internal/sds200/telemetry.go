@@ -337,8 +337,18 @@ func deriveHoldTarget(info ScannerInfo) HoldTarget {
 		return target
 	}
 	if target, ok := holdTargetFromNode(info.Nodes, "TGID", "TGID", "TGID", "Site"); ok {
+		if tgidNodes := info.Nodes["TGID"]; len(tgidNodes) > 0 {
+			target.SystemIndex = strings.TrimSpace(tgidNodes[0]["SystemIndex"])
+		}
 		if sysNodes := info.Nodes["System"]; len(sysNodes) > 0 {
-			target.SystemIndex = strings.TrimSpace(sysNodes[0]["Index"])
+			if target.SystemIndex == "" {
+				target.SystemIndex = strings.TrimSpace(sysNodes[0]["Index"])
+			}
+		}
+		if deptNodes := info.Nodes["Department"]; len(deptNodes) > 0 {
+			if target.SystemIndex == "" {
+				target.SystemIndex = strings.TrimSpace(deptNodes[0]["SystemIndex"])
+			}
 		}
 		return target
 	}

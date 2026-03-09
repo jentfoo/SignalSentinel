@@ -94,6 +94,28 @@ func TestEvaluateCapabilities(t *testing.T) {
 		assert.Equal(t, "hold target unavailable", caps[IntentUnavoid].DisabledReason)
 	})
 
+	t.Run("avoid_rejects_tgid_without_parent_system_index", func(t *testing.T) {
+		state := RuntimeState{Scanner: sds200.RuntimeStatus{
+			Connected:  true,
+			HoldTarget: sds200.HoldTarget{Keyword: "TGID", Arg1: "100", Arg2: "2"},
+		}}
+		caps := EvaluateCapabilities(registry, state, false)
+
+		assert.False(t, caps[IntentAvoid].Available)
+		assert.Contains(t, caps[IntentAvoid].DisabledReason, "missing parent system index")
+	})
+
+	t.Run("avoid_rejects_unsupported_hold_target", func(t *testing.T) {
+		state := RuntimeState{Scanner: sds200.RuntimeStatus{
+			Connected:  true,
+			HoldTarget: sds200.HoldTarget{Keyword: "WX", Arg1: "3"},
+		}}
+		caps := EvaluateCapabilities(registry, state, false)
+
+		assert.False(t, caps[IntentAvoid].Available)
+		assert.Contains(t, caps[IntentAvoid].DisabledReason, "unsupported")
+	})
+
 	t.Run("expert_and_default_disabled_reason", func(t *testing.T) {
 		state := RuntimeState{Scanner: sds200.RuntimeStatus{Connected: true}}
 		caps := EvaluateCapabilities(registry, state, false)

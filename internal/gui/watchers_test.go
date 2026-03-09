@@ -254,6 +254,35 @@ func TestApplyState(t *testing.T) {
 		assert.True(t, ui.startRecButton.Disabled())
 		assert.Contains(t, ui.startRecButton.Text, "Recording (")
 	})
+
+	t.Run("monitor_controls_respect_availability_flags", func(t *testing.T) {
+		model := &uiModel{selectedClip: -1}
+		ui := newTestUIViews(model)
+		ui.monitorListenButton = widget.NewButton("Listen", nil)
+		ui.monitorMuteButton = widget.NewButton("Mute", nil)
+		ui.monitorApplyButton = widget.NewButton("Apply", nil)
+
+		applyState(ui, model, RuntimeState{
+			Scanner: ScannerStatus{Connected: true, UpdatedAt: time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)},
+			Monitor: MonitorStatus{Enabled: false, Muted: false},
+		})
+		assert.True(t, ui.monitorListenButton.Disabled())
+		assert.True(t, ui.monitorMuteButton.Disabled())
+		assert.True(t, ui.monitorApplyButton.Disabled())
+
+		model.monitorListenAvailable = true
+		model.monitorMuteAvailable = true
+		model.monitorApplyAvailable = true
+		applyState(ui, model, RuntimeState{
+			Scanner: ScannerStatus{Connected: true, UpdatedAt: time.Date(2026, 3, 8, 10, 0, 1, 0, time.UTC)},
+			Monitor: MonitorStatus{Enabled: true, Muted: true},
+		})
+		assert.False(t, ui.monitorListenButton.Disabled())
+		assert.False(t, ui.monitorMuteButton.Disabled())
+		assert.False(t, ui.monitorApplyButton.Disabled())
+		assert.Equal(t, "Stop Listening", ui.monitorListenButton.Text)
+		assert.Equal(t, "Unmute", ui.monitorMuteButton.Text)
+	})
 }
 
 func TestApplyRecordingsLoadResult(t *testing.T) {

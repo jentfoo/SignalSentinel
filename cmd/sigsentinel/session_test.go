@@ -531,6 +531,48 @@ func TestScannerSessionExecuteIntent(t *testing.T) {
 		assert.Equal(t, "avoid target unavailable for current scanner state", err.Error())
 	})
 
+	t.Run("avoid_requires_tgid_parent_system_index", func(t *testing.T) {
+		client := &fakeSDS200Client{
+			telemetrySnapshot: sds200.RuntimeStatus{
+				HoldTarget: sds200.HoldTarget{Keyword: "TGID", Arg1: "100", Arg2: "2"},
+			},
+		}
+		session := &ScannerSession{client: client}
+
+		err := session.executeIntent(IntentAvoid, ControlParams{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "missing parent system index")
+		assert.Empty(t, client.snapshot().avoidCalls)
+	})
+
+	t.Run("avoid_rejects_unsupported_hold_target", func(t *testing.T) {
+		client := &fakeSDS200Client{
+			telemetrySnapshot: sds200.RuntimeStatus{
+				HoldTarget: sds200.HoldTarget{Keyword: "WX", Arg1: "2"},
+			},
+		}
+		session := &ScannerSession{client: client}
+
+		err := session.executeIntent(IntentAvoid, ControlParams{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported")
+		assert.Empty(t, client.snapshot().avoidCalls)
+	})
+
+	t.Run("avoid_rejects_unknown_hold_target_keyword", func(t *testing.T) {
+		client := &fakeSDS200Client{
+			telemetrySnapshot: sds200.RuntimeStatus{
+				HoldTarget: sds200.HoldTarget{Keyword: "mystery_mode", Arg1: "2"},
+			},
+		}
+		session := &ScannerSession{client: client}
+
+		err := session.executeIntent(IntentAvoid, ControlParams{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported")
+		assert.Empty(t, client.snapshot().avoidCalls)
+	})
+
 	t.Run("unavoid_calls_target", func(t *testing.T) {
 		client := &fakeSDS200Client{
 			telemetrySnapshot: sds200.RuntimeStatus{

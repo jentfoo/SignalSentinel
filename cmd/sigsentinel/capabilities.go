@@ -123,6 +123,11 @@ func EvaluateCapabilities(registry map[ControlIntent]CapabilitySpec, state Runti
 				disable("hold target unavailable")
 			}
 		}
+		if item.Available && (intent == IntentAvoid || intent == IntentUnavoid) {
+			if _, err := resolveAvoidTarget(state.Scanner.HoldTarget); err != nil {
+				disable(err.Error())
+			}
+		}
 		out[intent] = item
 	}
 	return out

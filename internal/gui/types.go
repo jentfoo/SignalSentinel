@@ -67,6 +67,7 @@ type ControlCapability struct {
 type RuntimeState struct {
 	Scanner   ScannerStatus
 	Recording RecordingStatus
+	Monitor   MonitorStatus
 }
 
 type ScannerStatus struct {
@@ -115,6 +116,15 @@ type RecordingStatus struct {
 	Manual    bool
 }
 
+type MonitorStatus struct {
+	Enabled      bool
+	Muted        bool
+	GainDB       float64
+	OutputDevice string
+	LastError    string
+	UpdatedAt    time.Time
+}
+
 type ScanScopeSnapshot struct {
 	FavoritesTag        int
 	SystemTag           int
@@ -157,23 +167,32 @@ type Settings struct {
 	HangTimeSeconds int
 	HangTimeChanged bool
 	Activity        ActivitySettings
+
+	AudioMonitorDefaultEnabled bool
+	AudioMonitorOutputDevice   string
+	AudioMonitorGainDB         float64
 }
 
 type Dependencies struct {
-	Title             string
-	InitialState      RuntimeState
-	InitialSettings   Settings
-	SubscribeState    func(context.Context) <-chan RuntimeState
-	ExecuteControl    func(ControlRequest) ControlResult
-	LoadScanScope     func(favoritesTag, systemTag int) (ScanScopeSnapshot, error)
-	LoadScanProfiles  func() ([]ScanProfile, error)
-	SaveScanProfile   func(ScanProfile) error
-	DeleteScanProfile func(string) error
-	ApplyScanProfile  func(name string, favoritesTag int, systemTag int) error
-	StartRecording    func() error
-	StopRecording     func() error
-	LoadRecordings    func() ([]Recording, error)
-	DeleteRecordings  func([]string) (DeleteReport, error)
-	SaveSettings      func(Settings) error
-	Fatal             <-chan error
+	Title                    string
+	InitialState             RuntimeState
+	InitialSettings          Settings
+	SubscribeState           func(context.Context) <-chan RuntimeState
+	ExecuteControl           func(ControlRequest) ControlResult
+	LoadScanScope            func(favoritesTag, systemTag int) (ScanScopeSnapshot, error)
+	LoadScanProfiles         func() ([]ScanProfile, error)
+	SaveScanProfile          func(ScanProfile) error
+	DeleteScanProfile        func(string) error
+	ApplyScanProfile         func(name string, favoritesTag int, systemTag int) error
+	StartRecording           func() error
+	StopRecording            func() error
+	SetMonitorListen         func(bool) error
+	SetMonitorMute           func(bool) error
+	SetMonitorGain           func(float64) error
+	SetMonitorOutputDevice   func(string) error
+	ListMonitorOutputDevices func() ([]string, error)
+	LoadRecordings           func() ([]Recording, error)
+	DeleteRecordings         func([]string) (DeleteReport, error)
+	SaveSettings             func(Settings) error
+	Fatal                    <-chan error
 }

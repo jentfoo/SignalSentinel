@@ -143,6 +143,9 @@ func (d *Document) ApplyDefaults() {
 	if d.Config.Activity.MinActivityMS == 0 {
 		d.Config.Activity.MinActivityMS = 300
 	}
+	if strings.TrimSpace(d.Config.AudioMonitor.OutputDevice) == "" {
+		d.Config.AudioMonitor.OutputDevice = "system-default"
+	}
 }
 
 func (d *Document) Validate() error {

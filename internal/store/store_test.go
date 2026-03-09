@@ -27,6 +27,7 @@ func TestStoreLoad(t *testing.T) {
 		assert.Equal(t, 600, doc.Config.Activity.EndDebounceMS)
 		assert.Equal(t, 300, doc.Config.Activity.MinActivityMS)
 		assert.InDelta(t, 0.0, doc.Config.AudioMonitor.GainDB, 0.000001)
+		assert.Equal(t, "system-default", doc.Config.AudioMonitor.OutputDevice)
 		assert.Empty(t, doc.State.Favorites)
 		assert.Empty(t, doc.State.Recordings)
 		assert.Empty(t, doc.State.ScanProfiles)

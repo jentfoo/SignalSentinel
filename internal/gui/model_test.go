@@ -318,3 +318,92 @@ func TestFormatSystemChannel(t *testing.T) {
 		})
 	}
 }
+
+func TestOrderedSelectedRecordingIDsLocked(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns_selected_ids_in_recording_order", func(t *testing.T) {
+		model := &uiModel{
+			recordings: []Recording{
+				{ID: "a"},
+				{ID: "b"},
+				{ID: "c"},
+			},
+			selectedIDs: map[string]struct{}{
+				"c": {},
+				"a": {},
+			},
+		}
+
+		ids := orderedSelectedRecordingIDsLocked(model)
+		assert.Equal(t, []string{"a", "c"}, ids)
+	})
+
+	t.Run("backfills_selection_from_selected_clip", func(t *testing.T) {
+		model := &uiModel{
+			recordings: []Recording{
+				{ID: "a"},
+				{ID: "b"},
+			},
+			selectedClip: 1,
+		}
+
+		ids := orderedSelectedRecordingIDsLocked(model)
+		assert.Equal(t, []string{"b"}, ids)
+	})
+}
+
+func TestSyncPrimarySelectionLocked(t *testing.T) {
+	t.Parallel()
+
+	t.Run("uses_existing_selected_id_when_present", func(t *testing.T) {
+		model := &uiModel{
+			recordings: []Recording{
+				{ID: "x"},
+				{ID: "y"},
+				{ID: "z"},
+			},
+			selectedID: "y",
+			selectedIDs: map[string]struct{}{
+				"y": {},
+				"z": {},
+			},
+		}
+
+		syncPrimarySelectionLocked(model)
+		assert.Equal(t, 1, model.selectedClip)
+		assert.Equal(t, "y", model.selectedID)
+	})
+
+	t.Run("falls_back_to_first_selected_recording", func(t *testing.T) {
+		model := &uiModel{
+			recordings: []Recording{
+				{ID: "x"},
+				{ID: "y"},
+				{ID: "z"},
+			},
+			selectedID: "missing",
+			selectedIDs: map[string]struct{}{
+				"z": {},
+			},
+		}
+
+		syncPrimarySelectionLocked(model)
+		assert.Equal(t, 2, model.selectedClip)
+		assert.Equal(t, "z", model.selectedID)
+	})
+
+	t.Run("backfills_selection_from_legacy_selected_clip", func(t *testing.T) {
+		model := &uiModel{
+			recordings:   []Recording{{ID: "x"}},
+			selectedClip: 0,
+			selectedID:   "x",
+			selectedIDs:  map[string]struct{}{},
+		}
+
+		syncPrimarySelectionLocked(model)
+		assert.Equal(t, 0, model.selectedClip)
+		assert.Equal(t, "x", model.selectedID)
+		assert.Equal(t, map[string]struct{}{"x": {}}, model.selectedIDs)
+	})
+}

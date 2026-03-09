@@ -104,6 +104,10 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 	pendingControlAction := model.pendingControlAction
 	pendingRecordingAction := model.pendingRecordingAction
 	pendingRecordingStop := model.pendingRecordingStop
+	pendingMonitorAction := model.pendingMonitorAction
+	monitorListenAvailable := model.monitorListenAvailable
+	monitorMuteAvailable := model.monitorMuteAvailable
+	monitorApplyAvailable := model.monitorApplyAvailable
 	model.mu.Unlock()
 
 	scanner := state.Scanner
@@ -222,6 +226,50 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 		}
 	}
 	applyRecordingButtonState(ui.startRecButton, state, pendingRecordingAction, pendingRecordingStop, time.Now())
+	if ui.monitorStatusLabel != nil {
+		monitorState := "Stopped"
+		if state.Monitor.Enabled {
+			monitorState = "Listening"
+		}
+		if state.Monitor.Muted {
+			monitorState += " (Muted)"
+		}
+		ui.monitorStatusLabel.SetText(monitorState)
+	}
+	if ui.monitorErrorLabel != nil {
+		ui.monitorErrorLabel.SetText(orDash(state.Monitor.LastError))
+	}
+	if ui.monitorListenButton != nil {
+		if state.Monitor.Enabled {
+			ui.monitorListenButton.SetText("Stop Listening")
+		} else {
+			ui.monitorListenButton.SetText("Listen")
+		}
+		if !monitorListenAvailable || pendingMonitorAction {
+			ui.monitorListenButton.Disable()
+		} else {
+			ui.monitorListenButton.Enable()
+		}
+	}
+	if ui.monitorMuteButton != nil {
+		if state.Monitor.Muted {
+			ui.monitorMuteButton.SetText("Unmute")
+		} else {
+			ui.monitorMuteButton.SetText("Mute")
+		}
+		if !monitorMuteAvailable || pendingMonitorAction {
+			ui.monitorMuteButton.Disable()
+		} else {
+			ui.monitorMuteButton.Enable()
+		}
+	}
+	if ui.monitorApplyButton != nil {
+		if !monitorApplyAvailable || pendingMonitorAction {
+			ui.monitorApplyButton.Disable()
+		} else {
+			ui.monitorApplyButton.Enable()
+		}
+	}
 
 	ui.activityList.Refresh()
 	if ui.suppressedList != nil {
@@ -290,48 +338,74 @@ func applyRecordingsLoadResult(model *uiModel, list *widget.List, errLabel *widg
 	if loadErr != nil {
 		model.mu.Lock()
 		model.recordingsErr = loadErr.Error()
+		ensureRecordingSelectionLocked(model)
+		selectedClip := model.selectedClip
+		hasSelection := len(model.selectedIDs) > 0
 		model.mu.Unlock()
 		errLabel.SetText("Recordings load error: " + loadErr.Error())
 		errLabel.Show()
+		setEnabled(playButton, selectedClip >= 0)
+		setEnabled(deleteButton, hasSelection)
 		return
 	}
 
 	model.mu.Lock()
+	ensureRecordingSelectionLocked(model)
 	dataChanged := !recordingsEqual(model.recordings, recs)
 	changed := forceRefresh || dataChanged
 	hadErr := model.recordingsErr != ""
 	model.recordingsErr = ""
 	if dataChanged {
 		prevSelectedID := model.selectedID
+		prevSelectedIDs := make(map[string]struct{}, len(model.selectedIDs))
+		for id := range model.selectedIDs {
+			prevSelectedIDs[id] = struct{}{}
+		}
 		model.recordings = recs
-		model.selectedClip = -1
-		model.selectedID = ""
-		if prevSelectedID != "" {
-			for i := range recs {
-				if recs[i].ID == prevSelectedID {
+		clearRecordingSelectionLocked(model)
+		for i := range recs {
+			recID := recs[i].ID
+			if _, ok := prevSelectedIDs[recID]; ok {
+				model.selectedIDs[recID] = struct{}{}
+				if recID == prevSelectedID {
 					model.selectedClip = i
-					model.selectedID = recs[i].ID
-					break
+					model.selectedID = recID
 				}
 			}
 		}
+		syncPrimarySelectionLocked(model)
+		if model.selectedClip >= 0 {
+			model.selectionAnchor = model.selectedClip
+		}
 	}
 	selectedClip := model.selectedClip
+	hasSelection := len(model.selectedIDs) > 0
 	model.mu.Unlock()
 
 	if hadErr {
 		errLabel.SetText("")
 		errLabel.Hide()
 	}
-	if dataChanged {
+	if changed {
 		setEnabled(playButton, selectedClip >= 0)
-		setEnabled(deleteButton, selectedClip >= 0)
+		setEnabled(deleteButton, hasSelection)
 	}
 	if changed {
 		list.Refresh()
 	}
-	if dataChanged && selectedClip >= 0 {
-		list.Select(selectedClip)
+	if dataChanged {
+		model.mu.Lock()
+		model.recordingsListSyncing = true
+		model.lastSelectionModifier = 0
+		model.mu.Unlock()
+		if selectedClip >= 0 {
+			list.Select(selectedClip)
+		} else {
+			list.UnselectAll()
+		}
+		model.mu.Lock()
+		model.recordingsListSyncing = false
+		model.mu.Unlock()
 	}
 }
 

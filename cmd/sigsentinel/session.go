@@ -430,20 +430,16 @@ func (s *ScannerSession) executeIntent(intent ControlIntent, params ControlParam
 		}
 		return client.JumpMode(mode, index)
 	case IntentAvoid:
-		status := client.TelemetrySnapshot()
-		target := status.HoldTarget
-		if target.Keyword == "" || target.Arg1 == "" {
-			return errors.New("avoid target unavailable for current scanner state")
+		avoidTarget, err := resolveAvoidTarget(client.TelemetrySnapshot().HoldTarget)
+		if err != nil {
+			return err
 		}
-		avoidTarget := toAvoidTarget(target)
 		return client.Avoid(avoidTarget.Keyword, avoidTarget.Arg1, avoidTarget.Arg2, 2)
 	case IntentUnavoid:
-		status := client.TelemetrySnapshot()
-		target := status.HoldTarget
-		if target.Keyword == "" || target.Arg1 == "" {
-			return errors.New("unavoid target unavailable for current scanner state")
+		avoidTarget, err := resolveAvoidTarget(client.TelemetrySnapshot().HoldTarget)
+		if err != nil {
+			return err
 		}
-		avoidTarget := toAvoidTarget(target)
 		return client.Avoid(avoidTarget.Keyword, avoidTarget.Arg1, avoidTarget.Arg2, 3)
 	case IntentSetFavoritesQuickKeys:
 		values, err := validateQuickKeyValues(params.QuickKeyValues, 100, "favorites quick keys")
@@ -554,20 +550,6 @@ func navigationTarget(status sds200.RuntimeStatus) (sds200.HoldTarget, error) {
 		return sds200.HoldTarget{}, errors.New("navigation target unavailable for current scanner state")
 	}
 	return target, nil
-}
-
-func toAvoidTarget(target sds200.HoldTarget) sds200.HoldTarget {
-	switch target.Keyword {
-	case "SWS_FREQ", "CS_FREQ", "QS_FREQ":
-		target.Keyword = "AFREQ"
-		target.Arg2 = ""
-	case "TGID":
-		target.Keyword = "ATGID"
-		target.Arg2 = target.SystemIndex
-	case "DEPT":
-		target.Arg2 = ""
-	}
-	return target
 }
 
 func (s *ScannerSession) resyncAfterScopeChange(client SDS200Client) error {

@@ -25,9 +25,17 @@ type uiModel struct {
 	suppressed             []string
 	selectedClip           int
 	selectedID             string
+	selectedIDs            map[string]struct{}
+	selectionAnchor        int
+	recordingsListSyncing  bool
+	lastSelectionModifier  int
 	pendingRecordingAction bool
 	pendingRecordingStop   bool
 	pendingControlAction   bool
+	pendingMonitorAction   bool
+	monitorListenAvailable bool
+	monitorMuteAvailable   bool
+	monitorApplyAvailable  bool
 	lastConnected          bool
 	everConnected          bool
 	fatalReceived          bool
@@ -388,6 +396,103 @@ func recordingsEqual(a, b []Recording) bool {
 		}
 	}
 	return true
+}
+
+func ensureRecordingSelectionLocked(model *uiModel) {
+	if model == nil {
+		return
+	}
+	if model.selectedIDs == nil {
+		model.selectedIDs = make(map[string]struct{})
+	}
+	if len(model.selectedIDs) > 0 {
+		return
+	}
+	if model.selectedID != "" {
+		model.selectedIDs[model.selectedID] = struct{}{}
+		return
+	}
+	if model.selectedClip >= 0 && model.selectedClip < len(model.recordings) {
+		id := model.recordings[model.selectedClip].ID
+		model.selectedID = id
+		model.selectedIDs[id] = struct{}{}
+	}
+}
+
+func clearRecordingSelectionLocked(model *uiModel) {
+	if model == nil {
+		return
+	}
+	model.selectedClip = -1
+	model.selectedID = ""
+	model.selectionAnchor = -1
+	if model.selectedIDs == nil {
+		model.selectedIDs = make(map[string]struct{})
+		return
+	}
+	for id := range model.selectedIDs {
+		delete(model.selectedIDs, id)
+	}
+}
+
+func isRecordingSelectedLocked(model *uiModel, idx int, id string) bool {
+	if model == nil {
+		return false
+	}
+	if model.selectedIDs != nil {
+		if _, ok := model.selectedIDs[id]; ok {
+			return true
+		}
+	}
+	return model.selectedClip == idx
+}
+
+func orderedSelectedRecordingIDsLocked(model *uiModel) []string {
+	if model == nil {
+		return nil
+	}
+	ensureRecordingSelectionLocked(model)
+	if len(model.selectedIDs) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(model.selectedIDs))
+	for i := range model.recordings {
+		id := model.recordings[i].ID
+		if _, ok := model.selectedIDs[id]; ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func syncPrimarySelectionLocked(model *uiModel) {
+	if model == nil {
+		return
+	}
+	ensureRecordingSelectionLocked(model)
+	if len(model.selectedIDs) == 0 {
+		clearRecordingSelectionLocked(model)
+		return
+	}
+	if model.selectedID != "" {
+		if _, ok := model.selectedIDs[model.selectedID]; ok {
+			for i := range model.recordings {
+				if model.recordings[i].ID == model.selectedID {
+					model.selectedClip = i
+					return
+				}
+			}
+		}
+	}
+	for i := range model.recordings {
+		id := model.recordings[i].ID
+		if _, ok := model.selectedIDs[id]; ok {
+			model.selectedClip = i
+			model.selectedID = id
+			return
+		}
+	}
+	clearRecordingSelectionLocked(model)
 }
 
 func formatRecording(rec Recording) string {

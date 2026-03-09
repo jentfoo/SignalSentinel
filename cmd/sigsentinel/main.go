@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jentfoo/SignalSentinel/internal/audio/ingest"
+	"github.com/jentfoo/SignalSentinel/internal/audio/monitor"
 	"github.com/jentfoo/SignalSentinel/internal/audio/recording"
 	"github.com/jentfoo/SignalSentinel/internal/gui"
 	"github.com/jentfoo/SignalSentinel/internal/sds200"
@@ -53,7 +54,7 @@ func run(opts cliFlags) error {
 	}
 	defer func() { _ = runtime.Close() }()
 
-	audioSession, recorder, audioErrs, err := startAudioPipeline(ctx, runtime)
+	audioSession, recorder, audioMonitor, audioErrs, err := startAudioPipeline(ctx, runtime)
 	if err != nil {
 		return fmt.Errorf("startup: %w", err)
 	}
@@ -62,11 +63,17 @@ func run(opts cliFlags) error {
 			log.Printf("recorder close error: %v", closeErr)
 		}
 	}()
+	defer func() {
+		if closeErr := audioMonitor.Close(); closeErr != nil {
+			log.Printf("monitor close error: %v", closeErr)
+		}
+	}()
 	defer func() { _ = audioSession.Close() }()
 
 	toGUIRuntimeState := func(status sds200.RuntimeStatus) gui.RuntimeState {
 		caps := EvaluateCapabilities(runtime.capabilities, RuntimeState{Scanner: status}, false)
 		recStatus := recorder.Snapshot()
+		monitorStatus := audioMonitor.Snapshot()
 		return gui.RuntimeState{
 			Scanner: gui.ScannerStatus{
 				Connected:     status.Connected,
@@ -98,6 +105,14 @@ func run(opts cliFlags) error {
 				Trigger:   recStatus.Trigger,
 				Manual:    recStatus.Manual,
 			},
+			Monitor: gui.MonitorStatus{
+				Enabled:      monitorStatus.Enabled,
+				Muted:        monitorStatus.Muted,
+				GainDB:       monitorStatus.GainDB,
+				OutputDevice: monitorStatus.OutputDevice,
+				LastError:    monitorStatus.LastError,
+				UpdatedAt:    monitorStatus.UpdatedAt,
+			},
 		}
 	}
 
@@ -112,6 +127,9 @@ func run(opts cliFlags) error {
 				EndDebounceMS:   cfg.Config.Activity.EndDebounceMS,
 				MinActivityMS:   cfg.Config.Activity.MinActivityMS,
 			},
+			AudioMonitorDefaultEnabled: cfg.Config.AudioMonitor.DefaultEnabled,
+			AudioMonitorOutputDevice:   cfg.Config.AudioMonitor.OutputDevice,
+			AudioMonitorGainDB:         cfg.Config.AudioMonitor.GainDB,
 		}
 	}
 
@@ -203,6 +221,21 @@ func run(opts cliFlags) error {
 			}
 			return nil
 		},
+		SetMonitorListen: func(enabled bool) error {
+			return audioMonitor.SetListen(enabled)
+		},
+		SetMonitorMute: func(muted bool) error {
+			return audioMonitor.SetMuted(muted)
+		},
+		SetMonitorGain: func(gainDB float64) error {
+			return audioMonitor.SetGainDB(gainDB)
+		},
+		SetMonitorOutputDevice: func(outputDevice string) error {
+			return audioMonitor.SetOutputDevice(outputDevice)
+		},
+		ListMonitorOutputDevices: func() ([]string, error) {
+			return monitor.ListOutputDevices(), nil
+		},
 		LoadRecordings: func() ([]gui.Recording, error) {
 			entries, err := runtime.Recordings()
 			if err != nil {
@@ -279,11 +312,23 @@ func run(opts cliFlags) error {
 					}
 					doc.Config.Recording.HangTimeSeconds = settings.HangTimeSeconds
 				}
+				doc.Config.AudioMonitor.DefaultEnabled = settings.AudioMonitorDefaultEnabled
+				doc.Config.AudioMonitor.OutputDevice = strings.TrimSpace(settings.AudioMonitorOutputDevice)
+				doc.Config.AudioMonitor.GainDB = settings.AudioMonitorGainDB
 				return nil
 			}); err != nil {
 				return err
 			}
-			return recorder.UpdateOutputDir(runtime.RecordingsPath())
+			if err := recorder.UpdateOutputDir(runtime.RecordingsPath()); err != nil {
+				return err
+			}
+			if err := audioMonitor.SetGainDB(settings.AudioMonitorGainDB); err != nil {
+				return err
+			}
+			if err := audioMonitor.SetOutputDevice(settings.AudioMonitorOutputDevice); err != nil {
+				return err
+			}
+			return nil
 		},
 		Fatal: fatalErrs,
 	})
@@ -499,11 +544,11 @@ func publishLatestGUIState(out chan gui.RuntimeState, state gui.RuntimeState) {
 	}
 }
 
-func startAudioPipeline(ctx context.Context, runtime *Runtime) (*ingest.Session, *recording.Manager, <-chan error, error) {
+func startAudioPipeline(ctx context.Context, runtime *Runtime) (*ingest.Session, *recording.Manager, *monitor.Manager, <-chan error, error) {
 	audioErrs := make(chan error, 1)
 	doc := runtime.Config()
 	if doc == nil {
-		return nil, nil, nil, errors.New("runtime config missing")
+		return nil, nil, nil, nil, errors.New("runtime config missing")
 	}
 
 	rec := recording.NewManager(recording.Config{
@@ -530,6 +575,22 @@ func startAudioPipeline(ctx context.Context, runtime *Runtime) (*ingest.Session,
 			return nil
 		},
 	})
+
+	audioMonitor := monitor.NewManager(monitor.Config{
+		OutputDevice: doc.Config.AudioMonitor.OutputDevice,
+		GainDB:       doc.Config.AudioMonitor.GainDB,
+		OnStatusChange: func(status monitor.Status) {
+			_ = status
+			if runtime.state != nil {
+				runtime.state.publish(runtime.StateSnapshot())
+			}
+		},
+	})
+	if doc.Config.AudioMonitor.DefaultEnabled {
+		if err := audioMonitor.SetListen(true); err != nil {
+			log.Printf("monitor warning: %v", err)
+		}
+	}
 
 	stateSub := runtime.SubscribeState(ctx)
 	go func() {
@@ -592,11 +653,18 @@ func startAudioPipeline(ctx context.Context, runtime *Runtime) (*ingest.Session,
 				case audioErrs <- fmt.Errorf("recording write: %w", err):
 				default:
 				}
+				return
 			}
+			audioMonitor.PushFrame(monitor.Frame{
+				Samples:      frame.Samples,
+				ReceivedAt:   frame.ReceivedAt,
+				RTPTimestamp: frame.RTPTimestamp,
+			})
 		},
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		_ = audioMonitor.Close()
+		return nil, nil, nil, nil, err
 	}
 
 	go func() {
@@ -614,7 +682,7 @@ func startAudioPipeline(ctx context.Context, runtime *Runtime) (*ingest.Session,
 		}
 	}()
 
-	return audioSession, rec, audioErrs, nil
+	return audioSession, rec, audioMonitor, audioErrs, nil
 }
 
 func recordingStatusChanged(a, b recording.Status) bool {

@@ -12,8 +12,8 @@ import (
 func TestAppendActivity(t *testing.T) {
 	t.Parallel()
 
-	t.Run("adds_transmission_start", func(t *testing.T) {
-		model := &uiModel{}
+	t.Run("starts_session_after_start_debounce", func(t *testing.T) {
+		model := &uiModel{activity: ActivitySettings{StartDebounceMS: 100, EndDebounceMS: 200, MinActivityMS: 300}}
 		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
 
 		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, UpdatedAt: t0}})
@@ -25,25 +25,41 @@ func TestAppendActivity(t *testing.T) {
 			Channel:   "Ops",
 			UpdatedAt: t0.Add(time.Second),
 		}})
+		assert.Empty(t, model.activities)
+
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{
+			Connected: true,
+			Active:    true,
+			Frequency: "155.2200",
+			System:    "County",
+			Channel:   "Ops",
+			UpdatedAt: t0.Add(time.Second + 150*time.Millisecond),
+		}})
 
 		require.Len(t, model.activities, 1)
-		assert.Contains(t, model.activities[0], "transmission start")
-		assert.Contains(t, model.activities[0], "155.2200 MHz / County / Ops")
+		assert.Contains(t, model.activities[0], "active")
+		assert.Contains(t, model.activities[0], "155.2200 MHz")
 	})
 
-	t.Run("adds_transmission_end", func(t *testing.T) {
-		model := &uiModel{}
+	t.Run("finalizes_after_end_debounce", func(t *testing.T) {
+		model := &uiModel{activity: ActivitySettings{StartDebounceMS: 100, EndDebounceMS: 200, MinActivityMS: 50}}
 		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
 
 		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: true, UpdatedAt: t0}})
-		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: false, UpdatedAt: t0.Add(time.Second)}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: true, UpdatedAt: t0.Add(150 * time.Millisecond)}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: false, UpdatedAt: t0.Add(500 * time.Millisecond)}})
 
 		require.Len(t, model.activities, 1)
-		assert.Contains(t, model.activities[0], "transmission end")
+		assert.Contains(t, model.activities[0], "active")
+
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: false, UpdatedAt: t0.Add(750 * time.Millisecond)}})
+		require.Len(t, model.activities, 1)
+		assert.Contains(t, model.activities[0], "->")
+		assert.NotContains(t, model.activities[0], "active")
 	})
 
 	t.Run("adds_disconnect_event", func(t *testing.T) {
-		model := &uiModel{}
+		model := &uiModel{activity: ActivitySettings{StartDebounceMS: 100, EndDebounceMS: 100, MinActivityMS: 100}}
 		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
 
 		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, UpdatedAt: t0}})
@@ -53,40 +69,116 @@ func TestAppendActivity(t *testing.T) {
 		assert.Contains(t, model.activities[0], "scanner disconnected")
 	})
 
-	t.Run("ignores_muted_signal_only_updates", func(t *testing.T) {
-		model := &uiModel{}
+	t.Run("disconnect_finalizes_session", func(t *testing.T) {
+		model := &uiModel{activity: ActivitySettings{StartDebounceMS: 100, EndDebounceMS: 100, MinActivityMS: 50}}
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: true, UpdatedAt: t0}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: true, UpdatedAt: t0.Add(150 * time.Millisecond)}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: false, UpdatedAt: t0.Add(400 * time.Millisecond)}})
+
+		require.Len(t, model.activities, 2)
+		assert.Contains(t, model.activities[0], "scanner disconnected")
+		assert.Contains(t, model.activities[1], "->")
+	})
+
+	t.Run("suppresses_short_sessions", func(t *testing.T) {
+		model := &uiModel{activity: ActivitySettings{StartDebounceMS: 100, EndDebounceMS: 100, MinActivityMS: 1000}}
 		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
 
 		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, UpdatedAt: t0}})
 		appendActivity(model, RuntimeState{Scanner: ScannerStatus{
 			Connected: true,
-			Active:    false,
-			Signal:    5,
-			Mute:      true,
+			Active:    true,
+			Frequency: "460.5500",
+			System:    "Metro",
+			Channel:   "Dispatch",
 			UpdatedAt: t0.Add(time.Second),
 		}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{
+			Connected: true,
+			Active:    true,
+			Frequency: "460.5500",
+			System:    "Metro",
+			Channel:   "Dispatch",
+			UpdatedAt: t0.Add(time.Second + 150*time.Millisecond),
+		}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: false, UpdatedAt: t0.Add(time.Second + 400*time.Millisecond)}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: false, UpdatedAt: t0.Add(time.Second + 600*time.Millisecond)}})
 
 		assert.Empty(t, model.activities)
+		require.Len(t, model.suppressed, 1)
+		assert.Contains(t, model.suppressed[0], "duration below minimum")
+	})
+
+	t.Run("suppresses_pre_debounce_blips", func(t *testing.T) {
+		model := &uiModel{activity: ActivitySettings{StartDebounceMS: 300, EndDebounceMS: 100, MinActivityMS: 100}}
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: true, UpdatedAt: t0}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: false, UpdatedAt: t0.Add(100 * time.Millisecond)}})
+
+		assert.Empty(t, model.activities)
+		require.Len(t, model.suppressed, 1)
+		assert.Contains(t, model.suppressed[0], "start debounce not met")
+	})
+
+	t.Run("promotes_pending_with_samples", func(t *testing.T) {
+		model := &uiModel{activity: ActivitySettings{StartDebounceMS: 300, EndDebounceMS: 100, MinActivityMS: 100}}
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: true, UpdatedAt: t0}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: true, UpdatedAt: t0.Add(100 * time.Millisecond)}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: false, UpdatedAt: t0.Add(450 * time.Millisecond)}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: false, UpdatedAt: t0.Add(600 * time.Millisecond)}})
+
+		require.Len(t, model.activities, 1)
+		assert.Contains(t, model.activities[0], "->")
+		assert.Empty(t, model.suppressed)
+	})
+
+	t.Run("single_sample_suppressed", func(t *testing.T) {
+		model := &uiModel{activity: ActivitySettings{StartDebounceMS: 300, EndDebounceMS: 100, MinActivityMS: 100}}
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: true, UpdatedAt: t0}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: false, UpdatedAt: t0.Add(500 * time.Millisecond)}})
+
+		assert.Empty(t, model.activities)
+		require.Len(t, model.suppressed, 1)
+		assert.Contains(t, model.suppressed[0], "insufficient active samples")
+	})
+
+	t.Run("disconnect_uses_pending_end", func(t *testing.T) {
+		model := &uiModel{activity: ActivitySettings{StartDebounceMS: 100, EndDebounceMS: 800, MinActivityMS: 100}}
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: true, UpdatedAt: t0}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: true, UpdatedAt: t0.Add(150 * time.Millisecond)}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: true, Active: false, UpdatedAt: t0.Add(time.Second)}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: false, UpdatedAt: t0.Add(2 * time.Second)}})
+
+		require.Len(t, model.activities, 2)
+		assert.Contains(t, model.activities[1], "-> 2026-03-08 10:00:01 | 1s")
+		assert.NotContains(t, model.activities[1], "| 2s")
 	})
 
 	t.Run("caps_activity_length", func(t *testing.T) {
-		model := &uiModel{initialized: true, lastActive: false, lastConnected: true}
+		model := &uiModel{
+			initialized:     true,
+			lastConnected:   true,
+			activity:        ActivitySettings{StartDebounceMS: 100, EndDebounceMS: 100, MinActivityMS: 100},
+			sessionRowIndex: -1,
+		}
 		for i := 0; i < 200; i++ {
 			model.activities = append(model.activities, "old_event")
 		}
 		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
 
-		appendActivity(model, RuntimeState{Scanner: ScannerStatus{
-			Connected: true,
-			Active:    true,
-			Frequency: "460.5000",
-			UpdatedAt: t0,
-			System:    "Metro",
-			Channel:   "Dispatch",
-		}})
+		appendActivity(model, RuntimeState{Scanner: ScannerStatus{Connected: false, UpdatedAt: t0}})
 
 		require.Len(t, model.activities, 200)
-		assert.Contains(t, model.activities[0], "transmission start")
+		assert.Contains(t, model.activities[0], "scanner disconnected")
 		assert.Equal(t, "old_event", model.activities[len(model.activities)-1])
 	})
 }
@@ -152,7 +244,7 @@ func TestFormatRecording(t *testing.T) {
 		assert.True(t, strings.HasPrefix(formatted, "- | - | - | - / - | clip.flac"))
 	})
 
-	t.Run("uses_placeholder_when_file_path_missing", func(t *testing.T) {
+	t.Run("uses_placeholder_no_file", func(t *testing.T) {
 		formatted := formatRecording(Recording{
 			StartedAt: "2026-03-08T10:00:00Z",
 			Duration:  "3s",
@@ -208,7 +300,21 @@ func TestFormatFrequency(t *testing.T) {
 func TestFormatSystemChannel(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, "County / Dispatch", formatSystemChannel("County", "Dispatch"))
-	assert.Equal(t, "- / Dispatch", formatSystemChannel("", "Dispatch"))
-	assert.Equal(t, "County / -", formatSystemChannel("County", ""))
+	tests := []struct {
+		name    string
+		system  string
+		channel string
+		want    string
+	}{
+		{name: "both_values", system: "County", channel: "Dispatch", want: "County / Dispatch"},
+		{name: "missing_system", system: "", channel: "Dispatch", want: "- / Dispatch"},
+		{name: "missing_channel", system: "County", channel: "", want: "County / -"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, formatSystemChannel(tt.system, tt.channel))
+		})
+	}
 }

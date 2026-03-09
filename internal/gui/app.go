@@ -8,14 +8,15 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -23,7 +24,7 @@ func Run(ctx context.Context, deps Dependencies) error {
 	if deps.SubscribeState == nil {
 		return errors.New("gui subscribe callback is required")
 	}
-	if deps.EnqueueControl == nil {
+	if deps.ExecuteControl == nil {
 		return errors.New("gui control callback is required")
 	}
 	if deps.StartRecording == nil {
@@ -54,6 +55,7 @@ func Run(ctx context.Context, deps Dependencies) error {
 		state:        deps.InitialState,
 		recordings:   initialRecordings,
 		selectedClip: -1,
+		activity:     normalizeActivitySettings(deps.InitialSettings.Activity),
 	}
 	if loadErr != nil {
 		model.recordingsErr = loadErr.Error()
@@ -68,6 +70,7 @@ func Run(ctx context.Context, deps Dependencies) error {
 
 	go watchState(stateCtx, deps, ui, model)
 	go pollRecordings(stateCtx, deps, ui, model)
+	go watchRecordingDuration(stateCtx, ui, model)
 
 	fatalErr := make(chan error, 1)
 	if deps.Fatal != nil {
@@ -94,12 +97,40 @@ func Run(ctx context.Context, deps Dependencies) error {
 }
 
 func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, func()) {
-	connLabel := widget.NewLabel("Disconnected")
-	reconnectLabel := widget.NewLabel("Connecting...")
-	reconnectLabel.Hide()
-	fatalLabel := widget.NewLabel("")
+	var views uiViews
 
+	statusPanel, runScanControl, applyControlResult := buildStatusPanel(model, deps, window, &views)
+	scopePanel := buildScopePanel(model, deps, window, runScanControl, applyControlResult)
+	views.activityList, views.suppressedList = buildActivityLists(model)
+	recordingsPanel, stopPlayback := buildRecordingsPanel(model, deps, window, &views)
+	settingsPanel := buildSettingsPanel(deps, window)
+
+	tabs := container.NewAppTabs(
+		container.NewTabItem("Status", statusPanel),
+		container.NewTabItem("Scope", container.NewVScroll(scopePanel)),
+		container.NewTabItem("Activity", container.NewAppTabs(
+			container.NewTabItem("Sessions", views.activityList),
+			container.NewTabItem("Suppressed (Diagnostics)", views.suppressedList),
+		)),
+		container.NewTabItem("Recordings", recordingsPanel),
+		container.NewTabItem("Settings", settingsPanel),
+	)
+	views.content = tabs
+
+	model.mu.Lock()
+	initialState := model.state
+	pendingRecordingAction := model.pendingRecordingAction
+	pendingRecordingStop := model.pendingRecordingStop
+	model.mu.Unlock()
+	applyRecordingButtonState(views.startRecButton, initialState, pendingRecordingAction, pendingRecordingStop, time.Now())
+
+	return views, stopPlayback
+}
+
+func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, views *uiViews) (fyne.CanvasObject, func(ControlRequest), func(ControlResult)) {
+	connectionLabel := widget.NewLabel("Connecting...")
 	modeLabel := widget.NewLabel("-")
+	lifecycleLabel := widget.NewLabel("Disconnected")
 	sourceLabel := widget.NewLabel("-")
 	freqLabel := widget.NewLabel("-")
 	systemLabel := widget.NewLabel("-")
@@ -112,23 +143,894 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 	muteLabel := widget.NewLabel("-")
 	volumeLabel := widget.NewLabel("-")
 	updatedLabel := widget.NewLabel("-")
-	spinner := widget.NewProgressBarInfinite()
-	spinner.Hide()
-	spinner.Stop()
+	holdStatusLabel := widget.NewLabel("-")
+	sourceLabel.Wrapping = fyne.TextWrapWord
+	systemLabel.Wrapping = fyne.TextWrapWord
+	deptLabel.Wrapping = fyne.TextWrapWord
+	channelLabel.Wrapping = fyne.TextWrapWord
+	tgidLabel.Wrapping = fyne.TextWrapWord
 
-	holdButton := widget.NewButton("Hold Current", func() {
-		deps.EnqueueControl(IntentHoldCurrent)
-	})
-	resumeButton := widget.NewButton("Resume Scan", func() {
-		deps.EnqueueControl(IntentResumeScan)
-	})
+	holdButton := widget.NewButton("Hold", nil)
+	nextButton := widget.NewButton("Next", nil)
+	previousButton := widget.NewButton("Previous", nil)
+	jumpTagButton := widget.NewButton("Jump Tag", nil)
+	qshButton := widget.NewButton("Quick Search Hold", nil)
+	jumpScanButton := widget.NewButton("Jump Scan", nil)
+	jumpWXButton := widget.NewButton("Jump WX", nil)
+	avoidButton := widget.NewButton("Avoid", nil)
+	setVolumeButton := widget.NewButton("Set Volume", nil)
+	setSquelchButton := widget.NewButton("Set Squelch", nil)
+	commandAction := widget.NewLabel("-")
+	commandStatus := widget.NewLabel("-")
+	commandMessage := widget.NewLabel("-")
+	commandRawReason := widget.NewLabel("-")
+	commandRetryHint := widget.NewLabel("-")
+	controlStatusSummary := widget.NewLabel("-")
+	controlStatusSummary.Wrapping = fyne.TextWrapWord
+	commandMessage.Wrapping = fyne.TextWrapWord
+	commandRawReason.Wrapping = fyne.TextWrapWord
+	commandRetryHint.Wrapping = fyne.TextWrapWord
+	tagFavEntry := widget.NewEntry()
+	tagFavEntry.SetText("0")
+	tagSysEntry := widget.NewEntry()
+	tagSysEntry.SetText("0")
+	tagChanEntry := widget.NewEntry()
+	tagChanEntry.SetText("0")
+	qshFreqEntry := widget.NewEntry()
+	qshFreqEntry.SetText("4600000")
+	volumeEntry := widget.NewEntry()
+	volumeEntry.SetText("10")
+	squelchEntry := widget.NewEntry()
+	squelchEntry.SetText("5")
+	qshFreqField := container.NewGridWrap(fyne.NewSize(140, qshFreqEntry.MinSize().Height), qshFreqEntry)
 	startRecButton := widget.NewButton("Start Recording", nil)
-	stopRecButton := widget.NewButton("Stop Recording", nil)
 	holdButton.Disable()
-	resumeButton.Disable()
+	nextButton.Disable()
+	previousButton.Disable()
+	jumpTagButton.Disable()
+	qshButton.Disable()
+	jumpScanButton.Disable()
+	jumpWXButton.Disable()
+	avoidButton.Disable()
+	setVolumeButton.Disable()
+	setSquelchButton.Disable()
 	startRecButton.Disable()
-	stopRecButton.Disable()
 
+	applyControlResult := func(result ControlResult) {
+		commandAction.SetText(orDash(result.Action) + " (" + orDash(result.Command) + ")")
+		if result.Success {
+			commandStatus.SetText("OK")
+		} else if result.Unsupported {
+			commandStatus.SetText("Unsupported")
+		} else {
+			commandStatus.SetText("Failed")
+		}
+		commandMessage.SetText(orDash(result.Message))
+		commandRawReason.SetText(orDash(result.RawReason))
+		commandRetryHint.SetText(orDash(result.RetryHint))
+	}
+	controlButtons := []*widget.Button{
+		holdButton, nextButton, previousButton, avoidButton,
+		jumpTagButton, qshButton, jumpScanButton, jumpWXButton,
+		setVolumeButton, setSquelchButton,
+	}
+	setControlButtonsEnabled := func(enabled bool) {
+		for _, btn := range controlButtons {
+			if enabled {
+				btn.Enable()
+			} else {
+				btn.Disable()
+			}
+		}
+	}
+	refreshControlButtonsFromModel := func() {
+		model.mu.Lock()
+		scanner := model.state.Scanner
+		pending := model.pendingControlAction
+		model.mu.Unlock()
+
+		holdIntent := IntentHoldCurrent
+		if scanner.Hold {
+			holdIntent = IntentReleaseHold
+		}
+		avoidIntent := IntentAvoid
+		if scanner.AvoidKnown && scanner.Avoided {
+			avoidIntent = IntentUnavoid
+		}
+		applyControlState(holdButton, capabilityFor(scanner, holdIntent))
+		applyControlState(nextButton, capabilityFor(scanner, IntentNext))
+		applyControlState(previousButton, capabilityFor(scanner, IntentPrevious))
+		applyControlState(jumpTagButton, capabilityFor(scanner, IntentJumpNumberTag))
+		applyControlState(qshButton, capabilityFor(scanner, IntentQuickSearchHold))
+		applyControlState(jumpScanButton, capabilityFor(scanner, IntentJumpMode))
+		applyControlState(jumpWXButton, capabilityFor(scanner, IntentJumpMode))
+		applyControlState(avoidButton, capabilityFor(scanner, avoidIntent))
+		applyControlState(setVolumeButton, capabilityFor(scanner, IntentSetVolume))
+		applyControlState(setSquelchButton, capabilityFor(scanner, IntentSetSquelch))
+		if pending {
+			setControlButtonsEnabled(false)
+		}
+	}
+	runScanControl := func(req ControlRequest) {
+		model.mu.Lock()
+		if model.pendingControlAction {
+			model.mu.Unlock()
+			return
+		}
+		model.pendingControlAction = true
+		model.mu.Unlock()
+		setControlButtonsEnabled(false)
+		go func() {
+			result := deps.ExecuteControl(req)
+			fyne.Do(func() {
+				model.mu.Lock()
+				model.pendingControlAction = false
+				model.mu.Unlock()
+				refreshControlButtonsFromModel()
+				if !result.Success {
+					summary := strings.TrimSpace(result.Message)
+					if summary == "" || summary == "-" {
+						summary = "command failed"
+					}
+					raw := strings.TrimSpace(result.RawReason)
+					if raw != "" && raw != "-" {
+						summary = summary + ": " + raw
+					}
+					dialog.ShowInformation("Scanner Control", summary, window)
+				}
+				applyControlResult(result)
+			})
+		}()
+	}
+	holdButton.OnTapped = func() {
+		model.mu.Lock()
+		holding := model.state.Scanner.Hold
+		model.mu.Unlock()
+		intent := IntentHoldCurrent
+		if holding {
+			intent = IntentReleaseHold
+		}
+		runScanControl(ControlRequest{Intent: intent})
+	}
+	nextButton.OnTapped = func() {
+		runScanControl(ControlRequest{Intent: IntentNext})
+	}
+	previousButton.OnTapped = func() {
+		runScanControl(ControlRequest{Intent: IntentPrevious})
+	}
+	jumpTagButton.OnTapped = func() {
+		fav, err := parseIntEntry("Favorites tag", tagFavEntry)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		sys, err := parseIntEntry("System tag", tagSysEntry)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		chanTag, err := parseIntEntry("Channel tag", tagChanEntry)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		if fav < 0 || fav > 99 {
+			dialog.ShowError(errors.New("favorites tag must be in range 0-99"), window)
+			return
+		}
+		if sys < 0 || sys > 99 {
+			dialog.ShowError(errors.New("system tag must be in range 0-99"), window)
+			return
+		}
+		if chanTag < 0 || chanTag > 999 {
+			dialog.ShowError(errors.New("channel tag must be in range 0-999"), window)
+			return
+		}
+		runScanControl(ControlRequest{
+			Intent:    IntentJumpNumberTag,
+			NumberTag: NumberTag{Favorites: fav, System: sys, Channel: chanTag},
+		})
+	}
+	qshButton.OnTapped = func() {
+		freq, err := parseIntEntry("Quick search frequency", qshFreqEntry)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		runScanControl(ControlRequest{
+			Intent:      IntentQuickSearchHold,
+			FrequencyHz: freq,
+		})
+	}
+	jumpScanButton.OnTapped = func() {
+		runScanControl(ControlRequest{
+			Intent:    IntentJumpMode,
+			JumpMode:  "SCN_MODE",
+			JumpIndex: "0xFFFFFFFF",
+		})
+	}
+	jumpWXButton.OnTapped = func() {
+		runScanControl(ControlRequest{
+			Intent:    IntentJumpMode,
+			JumpMode:  "WX_MODE",
+			JumpIndex: "NORMAL",
+		})
+	}
+	avoidButton.OnTapped = func() {
+		model.mu.Lock()
+		state := model.state.Scanner
+		model.mu.Unlock()
+		intent := IntentAvoid
+		if state.AvoidKnown && state.Avoided {
+			intent = IntentUnavoid
+		} else if !state.AvoidKnown {
+			// Unknown state — toggle toward avoid
+			intent = IntentAvoid
+		}
+		runScanControl(ControlRequest{Intent: intent})
+	}
+	setVolumeButton.OnTapped = func() {
+		level, err := parseIntEntry("Volume", volumeEntry)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		runScanControl(ControlRequest{
+			Intent: IntentSetVolume,
+			Volume: level,
+		})
+	}
+	setSquelchButton.OnTapped = func() {
+		level, err := parseIntEntry("Squelch", squelchEntry)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		runScanControl(ControlRequest{
+			Intent:  IntentSetSquelch,
+			Squelch: level,
+		})
+	}
+	startRecButton.OnTapped = func() {
+		model.mu.Lock()
+		if model.pendingRecordingAction {
+			model.mu.Unlock()
+			return
+		}
+		state := model.state
+		if state.Recording.Active && !state.Recording.Manual {
+			model.mu.Unlock()
+			return
+		}
+		if !state.Recording.Active && !state.Scanner.Connected {
+			model.mu.Unlock()
+			return
+		}
+		model.pendingRecordingAction = true
+		model.pendingRecordingStop = state.Recording.Active
+		model.mu.Unlock()
+
+		applyRecordingButtonState(startRecButton, state, true, state.Recording.Active, time.Now())
+
+		go func() {
+			var err error
+			if state.Recording.Active {
+				err = deps.StopRecording()
+			} else {
+				err = deps.StartRecording()
+			}
+			fyne.Do(func() {
+				model.mu.Lock()
+				model.pendingRecordingAction = false
+				model.pendingRecordingStop = false
+				latest := model.state
+				pending := model.pendingRecordingAction
+				pendingStop := model.pendingRecordingStop
+				model.mu.Unlock()
+				if err != nil {
+					dialog.ShowError(err, window)
+				}
+				applyRecordingButtonState(startRecButton, latest, pending, pendingStop, time.Now())
+			})
+		}()
+	}
+
+	views.connectionLabel = connectionLabel
+	views.modeLabel = modeLabel
+	views.lifecycleLabel = lifecycleLabel
+	views.sourceLabel = sourceLabel
+	views.freqLabel = freqLabel
+	views.systemLabel = systemLabel
+	views.deptLabel = deptLabel
+	views.channelLabel = channelLabel
+	views.tgidLabel = tgidLabel
+	views.signalLabel = signalLabel
+	views.squelchLabel = squelchLabel
+	views.squelchLvlLabel = squelchLvlLabel
+	views.muteLabel = muteLabel
+	views.volumeLabel = volumeLabel
+	views.updatedLabel = updatedLabel
+	views.holdStatusLabel = holdStatusLabel
+	views.holdButton = holdButton
+	views.nextButton = nextButton
+	views.previousButton = previousButton
+	views.jumpTagButton = jumpTagButton
+	views.qshButton = qshButton
+	views.jumpScanButton = jumpScanButton
+	views.jumpWXButton = jumpWXButton
+	views.avoidButton = avoidButton
+	views.setVolumeButton = setVolumeButton
+	views.setSquelchButton = setSquelchButton
+	views.commandAction = commandAction
+	views.commandStatus = commandStatus
+	views.commandMessage = commandMessage
+	views.commandRawReason = commandRawReason
+	views.commandRetryHint = commandRetryHint
+	views.controlStatus = controlStatusSummary
+	views.tagFavEntry = tagFavEntry
+	views.tagSysEntry = tagSysEntry
+	views.tagChanEntry = tagChanEntry
+	views.qshFreqEntry = qshFreqEntry
+	views.volumeEntry = volumeEntry
+	views.squelchEntry = squelchEntry
+	views.startRecButton = startRecButton
+
+	commandField := func(label string, value *widget.Label) fyne.CanvasObject {
+		labelWidget := widget.NewLabel(label)
+		labelSlot := container.NewGridWrap(fyne.NewSize(84, labelWidget.MinSize().Height), labelWidget)
+		return container.NewBorder(nil, nil, labelSlot, nil, value)
+	}
+	statusField := func(label string, value *widget.Label) *widget.FormItem {
+		return widget.NewFormItem(label, value)
+	}
+	statusSummary := widget.NewCard("Current Scanner", "", container.NewVBox(
+		widget.NewLabelWithStyle("Session", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewForm(
+			statusField("Connection", connectionLabel),
+			statusField("State", lifecycleLabel),
+			statusField("Mode", modeLabel),
+			statusField("View", sourceLabel),
+			statusField("Updated", updatedLabel),
+			statusField("Signal", signalLabel),
+		),
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Channel", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewForm(
+			statusField("Frequency", freqLabel),
+			statusField("System", systemLabel),
+			statusField("Department", deptLabel),
+			statusField("Channel", channelLabel),
+			statusField("Talkgroup", tgidLabel),
+			statusField("Hold", holdStatusLabel),
+		),
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Audio", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewForm(
+			statusField("Squelch", squelchLabel),
+			statusField("SQL Level", squelchLvlLabel),
+			statusField("Mute", muteLabel),
+			statusField("Volume", volumeLabel),
+		),
+	))
+
+	availabilityPanel := widget.NewCard("Control Availability", "", controlStatusSummary)
+	commandPanel := widget.NewCard("Last Command", "", container.NewVBox(
+		commandField("Action", commandAction),
+		commandField("Status", commandStatus),
+		commandField("Message", commandMessage),
+		commandField("Raw", commandRawReason),
+		commandField("Retry", commandRetryHint),
+	))
+
+	controls := container.NewVBox(
+		widget.NewLabel("Scanner Control"),
+		container.NewHBox(holdButton, nextButton, previousButton, avoidButton),
+		container.NewHBox(
+			widget.NewLabel("Fav"),
+			tagFavEntry,
+			widget.NewLabel("Sys"),
+			tagSysEntry,
+			widget.NewLabel("Chan"),
+			tagChanEntry,
+			jumpTagButton,
+		),
+		container.NewHBox(
+			widget.NewLabel("Freq Hz"),
+			qshFreqField,
+			qshButton,
+		),
+		container.NewHBox(jumpScanButton, jumpWXButton),
+		container.NewHBox(
+			widget.NewLabel("Volume"),
+			container.NewGridWrap(fyne.NewSize(100, volumeEntry.MinSize().Height), volumeEntry),
+			setVolumeButton,
+			widget.NewLabel("Squelch"),
+			container.NewGridWrap(fyne.NewSize(100, squelchEntry.MinSize().Height), squelchEntry),
+			setSquelchButton,
+		),
+		widget.NewSeparator(),
+		availabilityPanel,
+		commandPanel,
+		widget.NewSeparator(),
+		widget.NewLabel("Recording Control"),
+		container.NewHBox(startRecButton),
+	)
+	controlsScroll := container.NewVScroll(controls)
+	statusSplit := container.NewHSplit(container.NewPadded(statusSummary), controlsScroll)
+	statusSplit.SetOffset(0.40)
+
+	return statusSplit, runScanControl, applyControlResult
+}
+
+func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runScanControl func(ControlRequest), applyControlResult func(ControlResult)) fyne.CanvasObject {
+	scopeFavEntry := widget.NewEntry()
+	scopeFavEntry.SetText("0")
+	scopeSysEntry := widget.NewEntry()
+	scopeSysEntry.SetText("0")
+	fqkEntry := widget.NewMultiLineEntry()
+	sqkEntry := widget.NewMultiLineEntry()
+	dqkEntry := widget.NewMultiLineEntry()
+	svcEntry := widget.NewMultiLineEntry()
+	filterEntry := widget.NewEntry()
+	previewLabel := widget.NewLabel("-")
+	scopeTargetSelect := widget.NewSelect([]string{"Favorites", "Systems", "Departments", "Service Types"}, nil)
+	scopeTargetSelect.SetSelected("Favorites")
+	loadScopeButton := widget.NewButton("Load Scope", nil)
+	applyFQKButton := widget.NewButton("Apply Favorites", nil)
+	applySQKButton := widget.NewButton("Apply Systems", nil)
+	applyDQKButton := widget.NewButton("Apply Departments", nil)
+	applySVCButton := widget.NewButton("Apply Service Types", nil)
+	selectAllButton := widget.NewButton("Select All", nil)
+	selectNoneButton := widget.NewButton("Select None", nil)
+	svcDefaultsButton := widget.NewButton("Service Type Defaults", nil)
+	svcResetButton := widget.NewButton("Reset Service Types", nil)
+	profileNameEntry := widget.NewEntry()
+	profileNameEntry.SetPlaceHolder("profile name")
+	profileSelect := widget.NewSelect([]string{}, nil)
+	saveProfileButton := widget.NewButton("Save Profile", nil)
+	loadProfileButton := widget.NewButton("Edit Profile", nil)
+	applyProfileButton := widget.NewButton("Apply Profile", nil)
+	deleteProfileButton := widget.NewButton("Delete Profile", nil)
+	refreshProfilesButton := widget.NewButton("Refresh Profiles", nil)
+
+	stagedFQK := make([]int, 100)
+	stagedSQK := make([]int, 100)
+	stagedDQK := make([]int, 100)
+	stagedSVC := allEnabledState(47)
+	lastLoadedSVC := copyInts(stagedSVC)
+	fqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedFQK)))
+	sqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSQK)))
+	dqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedDQK)))
+	svcEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSVC)))
+
+	activeScopeEntry := func() *widget.Entry {
+		switch scopeTargetSelect.Selected {
+		case "Systems":
+			return sqkEntry
+		case "Departments":
+			return dqkEntry
+		case "Service Types":
+			return svcEntry
+		default:
+			return fqkEntry
+		}
+	}
+	refreshScopePreview := func() {
+		entry := activeScopeEntry()
+		maxIndex := 99
+		if entry == svcEntry {
+			maxIndex = 46
+		}
+		indexes, err := parseIndexList(entry.Text, maxIndex)
+		if err != nil {
+			previewLabel.SetText("preview unavailable: " + err.Error())
+			return
+		}
+		filtered := filterIndexes(indexes, filterEntry.Text)
+		previewLabel.SetText(fmt.Sprintf("staged %s: %d selected (%s)", scopeTargetSelect.Selected, len(indexes), encodeIndexList(filtered)))
+	}
+	filterEntry.OnChanged = func(_ string) {
+		refreshScopePreview()
+	}
+	scopeTargetSelect.OnChanged = func(_ string) {
+		refreshScopePreview()
+	}
+
+	parseScopeState := func(name string, entry *widget.Entry, maxIndex int, length int) ([]int, error) {
+		indexes, err := parseIndexList(entry.Text, maxIndex)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		return indexesToBinaryState(indexes, length), nil
+	}
+	loadScopeContext := func() (int, int, error) {
+		fav, err := parseIntEntry("Scope favorites quick key", scopeFavEntry)
+		if err != nil {
+			return 0, 0, err
+		}
+		sys, err := parseIntEntry("Scope system quick key", scopeSysEntry)
+		if err != nil {
+			return 0, 0, err
+		}
+		if fav < 0 || fav > 99 {
+			return 0, 0, errors.New("scope favorites quick key must be in range 0-99")
+		}
+		if sys < 0 || sys > 99 {
+			return 0, 0, errors.New("scope system quick key must be in range 0-99")
+		}
+		return fav, sys, nil
+	}
+
+	applyFQKButton.OnTapped = func() {
+		state, err := parseScopeState("FQK", fqkEntry, 99, 100)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		stagedFQK = state
+		runScanControl(ControlRequest{
+			Intent:         IntentSetFQK,
+			QuickKeyValues: copyInts(state),
+		})
+		refreshScopePreview()
+	}
+	applySQKButton.OnTapped = func() {
+		fav, _, err := loadScopeContext()
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		state, err := parseScopeState("SQK", sqkEntry, 99, 100)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		stagedSQK = state
+		runScanControl(ControlRequest{
+			Intent:            IntentSetSQK,
+			ScopeFavoritesTag: fav,
+			QuickKeyValues:    copyInts(state),
+		})
+		refreshScopePreview()
+	}
+	applyDQKButton.OnTapped = func() {
+		fav, sys, err := loadScopeContext()
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		state, err := parseScopeState("DQK", dqkEntry, 99, 100)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		stagedDQK = state
+		runScanControl(ControlRequest{
+			Intent:            IntentSetDQK,
+			ScopeFavoritesTag: fav,
+			ScopeSystemTag:    sys,
+			QuickKeyValues:    copyInts(state),
+		})
+		refreshScopePreview()
+	}
+	applySVCButton.OnTapped = func() {
+		state, err := parseScopeState("SVC", svcEntry, 46, 47)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		stagedSVC = state
+		runScanControl(ControlRequest{
+			Intent:       IntentSetServiceTypes,
+			ServiceTypes: copyInts(state),
+		})
+		refreshScopePreview()
+	}
+	selectAllButton.OnTapped = func() {
+		entry := activeScopeEntry()
+		maxIndex := 99
+		if entry == svcEntry {
+			maxIndex = 46
+		}
+		all := make([]int, maxIndex+1)
+		for i := 0; i <= maxIndex; i++ {
+			all[i] = i
+		}
+		entry.SetText(encodeIndexList(all))
+		refreshScopePreview()
+	}
+	selectNoneButton.OnTapped = func() {
+		entry := activeScopeEntry()
+		entry.SetText("")
+		refreshScopePreview()
+	}
+	svcDefaultsButton.OnTapped = func() {
+		defaultState := allEnabledState(47)
+		stagedSVC = defaultState
+		svcEntry.SetText(encodeIndexList(binaryStateToIndexes(defaultState)))
+		refreshScopePreview()
+	}
+	svcResetButton.OnTapped = func() {
+		stagedSVC = copyInts(lastLoadedSVC)
+		svcEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSVC)))
+		refreshScopePreview()
+	}
+
+	if deps.LoadScanScope != nil {
+		loadScopeButton.OnTapped = func() {
+			fav, sys, err := loadScopeContext()
+			if err != nil {
+				dialog.ShowError(err, window)
+				return
+			}
+			go func() {
+				scope, loadErr := deps.LoadScanScope(fav, sys)
+				fyne.Do(func() {
+					if loadErr != nil {
+						dialog.ShowError(loadErr, window)
+						return
+					}
+					stagedFQK = copyInts(scope.FavoritesQuickKeys)
+					stagedSQK = copyInts(scope.SystemQuickKeys)
+					stagedDQK = copyInts(scope.DepartmentQuickKeys)
+					stagedSVC = copyInts(scope.ServiceTypes)
+					lastLoadedSVC = copyInts(scope.ServiceTypes)
+					fqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedFQK)))
+					sqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSQK)))
+					dqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedDQK)))
+					svcEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSVC)))
+					refreshScopePreview()
+				})
+			}()
+		}
+	} else {
+		loadScopeButton.Disable()
+	}
+
+	refreshProfiles := func() {
+		if deps.LoadScanProfiles == nil {
+			profileSelect.Options = nil
+			profileSelect.SetSelected("")
+			saveProfileButton.Disable()
+			loadProfileButton.Disable()
+			applyProfileButton.Disable()
+			deleteProfileButton.Disable()
+			refreshProfilesButton.Disable()
+			return
+		}
+		go func() {
+			profiles, err := deps.LoadScanProfiles()
+			fyne.Do(func() {
+				if err != nil {
+					dialog.ShowError(err, window)
+					return
+				}
+				names := make([]string, 0, len(profiles))
+				for _, profile := range profiles {
+					names = append(names, profile.Name)
+				}
+				profileSelect.Options = names
+				profileSelect.Refresh()
+				if len(names) > 0 {
+					if profileSelect.Selected == "" {
+						profileSelect.SetSelected(names[0])
+					}
+				} else {
+					profileSelect.SetSelected("")
+				}
+			})
+		}()
+	}
+	refreshProfilesButton.OnTapped = refreshProfiles
+
+	if deps.SaveScanProfile != nil {
+		saveProfileButton.OnTapped = func() {
+			name := strings.TrimSpace(profileNameEntry.Text)
+			if name == "" {
+				dialog.ShowError(errors.New("profile name is required"), window)
+				return
+			}
+			fav, sys, err := loadScopeContext()
+			if err != nil {
+				dialog.ShowError(err, window)
+				return
+			}
+			fqkState, err := parseScopeState("FQK", fqkEntry, 99, 100)
+			if err != nil {
+				dialog.ShowError(err, window)
+				return
+			}
+			sqkState, err := parseScopeState("SQK", sqkEntry, 99, 100)
+			if err != nil {
+				dialog.ShowError(err, window)
+				return
+			}
+			dqkState, err := parseScopeState("DQK", dqkEntry, 99, 100)
+			if err != nil {
+				dialog.ShowError(err, window)
+				return
+			}
+			svcState, err := parseScopeState("SVC", svcEntry, 46, 47)
+			if err != nil {
+				dialog.ShowError(err, window)
+				return
+			}
+			profile := ScanProfile{
+				Name:               name,
+				FavoritesQuickKeys: fqkState,
+				ServiceTypes:       svcState,
+				SystemQuickKeys: map[string][]int{
+					strconv.Itoa(fav): sqkState,
+				},
+				DepartmentQuickKeys: map[string][]int{
+					fmt.Sprintf("%d:%d", fav, sys): dqkState,
+				},
+			}
+			go func() {
+				err := deps.SaveScanProfile(profile)
+				fyne.Do(func() {
+					if err != nil {
+						dialog.ShowError(err, window)
+						return
+					}
+					profileNameEntry.SetText(name)
+					refreshProfiles()
+				})
+			}()
+		}
+	} else {
+		saveProfileButton.Disable()
+	}
+	if deps.DeleteScanProfile != nil {
+		deleteProfileButton.OnTapped = func() {
+			name := strings.TrimSpace(profileSelect.Selected)
+			if name == "" {
+				dialog.ShowError(errors.New("select a profile first"), window)
+				return
+			}
+			go func() {
+				err := deps.DeleteScanProfile(name)
+				fyne.Do(func() {
+					if err != nil {
+						dialog.ShowError(err, window)
+						return
+					}
+					refreshProfiles()
+				})
+			}()
+		}
+	} else {
+		deleteProfileButton.Disable()
+	}
+
+	loadProfileToStaged := func(profileName string) {
+		if deps.LoadScanProfiles == nil {
+			return
+		}
+		fav, sys, err := loadScopeContext()
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		go func() {
+			profiles, loadErr := deps.LoadScanProfiles()
+			fyne.Do(func() {
+				if loadErr != nil {
+					dialog.ShowError(loadErr, window)
+					return
+				}
+				for _, profile := range profiles {
+					if !strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(profileName)) {
+						continue
+					}
+					stagedFQK = copyInts(profile.FavoritesQuickKeys)
+					profileNameEntry.SetText(profileName)
+					stagedSQK = make([]int, 100)
+					stagedDQK = make([]int, 100)
+					stagedSVC = copyInts(profile.ServiceTypes)
+					lastLoadedSVC = copyInts(profile.ServiceTypes)
+					for key, values := range profile.SystemQuickKeys {
+						tag, convErr := strconv.Atoi(strings.TrimSpace(key))
+						if convErr == nil && tag == fav {
+							stagedSQK = copyInts(values)
+							break
+						}
+					}
+					for key, values := range profile.DepartmentQuickKeys {
+						parts := strings.Split(strings.TrimSpace(key), ":")
+						if len(parts) != 2 {
+							continue
+						}
+						favTag, favErr := strconv.Atoi(strings.TrimSpace(parts[0]))
+						sysTag, sysErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+						if favErr == nil && sysErr == nil && favTag == fav && sysTag == sys {
+							stagedDQK = copyInts(values)
+							break
+						}
+					}
+					fqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedFQK)))
+					sqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSQK)))
+					dqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedDQK)))
+					svcEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSVC)))
+					refreshScopePreview()
+					return
+				}
+				dialog.ShowError(fmt.Errorf("scan profile not found: %s", profileName), window)
+			})
+		}()
+	}
+	loadProfileButton.OnTapped = func() {
+		name := strings.TrimSpace(profileSelect.Selected)
+		if name == "" {
+			dialog.ShowError(errors.New("select a profile first"), window)
+			return
+		}
+		loadProfileToStaged(name)
+	}
+
+	if deps.ApplyScanProfile != nil {
+		applyProfileButton.OnTapped = func() {
+			name := strings.TrimSpace(profileSelect.Selected)
+			if name == "" {
+				dialog.ShowError(errors.New("select a profile first"), window)
+				return
+			}
+			fav, sys, err := loadScopeContext()
+			if err != nil {
+				dialog.ShowError(err, window)
+				return
+			}
+			go func() {
+				err := deps.ApplyScanProfile(name, fav, sys)
+				fyne.Do(func() {
+					if err != nil {
+						dialog.ShowError(err, window)
+						return
+					}
+					applyControlResult(ControlResult{
+						Action:    "Apply Profile",
+						Command:   "FQK/SQK/DQK/SVC",
+						Success:   true,
+						Message:   "profile applied",
+						RawReason: "-",
+						RetryHint: "-",
+					})
+				})
+			}()
+		}
+	} else {
+		applyProfileButton.Disable()
+	}
+	refreshProfiles()
+	refreshScopePreview()
+
+	return container.NewVBox(
+		widget.NewLabel("Scan Scope Control"),
+		container.NewHBox(
+			widget.NewLabel("Fav QK"),
+			container.NewGridWrap(fyne.NewSize(80, scopeFavEntry.MinSize().Height), scopeFavEntry),
+			widget.NewLabel("Sys QK"),
+			container.NewGridWrap(fyne.NewSize(80, scopeSysEntry.MinSize().Height), scopeSysEntry),
+			loadScopeButton,
+		),
+		widget.NewForm(
+			widget.NewFormItem("Favorites Quick Keys \u2014 On Indexes (0-99)", fqkEntry),
+			widget.NewFormItem("System Quick Keys \u2014 On Indexes (0-99)", sqkEntry),
+			widget.NewFormItem("Department Quick Keys \u2014 On Indexes (0-99)", dqkEntry),
+			widget.NewFormItem("Service Types \u2014 On Indexes (0-46)", svcEntry),
+		),
+		container.NewHBox(applyFQKButton, applySQKButton, applyDQKButton, applySVCButton),
+		container.NewHBox(scopeTargetSelect, filterEntry, selectAllButton, selectNoneButton),
+		container.NewHBox(svcDefaultsButton, svcResetButton),
+		previewLabel,
+		widget.NewSeparator(),
+		widget.NewLabel("Scan Profiles"),
+		container.NewHBox(profileNameEntry, saveProfileButton, refreshProfilesButton),
+		container.NewHBox(profileSelect, loadProfileButton, applyProfileButton, deleteProfileButton),
+	)
+}
+
+func buildActivityLists(model *uiModel) (*widget.List, *widget.List) {
 	activityList := widget.NewList(
 		func() int {
 			model.mu.Lock()
@@ -149,7 +1051,30 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 			label.SetText(model.activities[id])
 		},
 	)
+	suppressedList := widget.NewList(
+		func() int {
+			model.mu.Lock()
+			defer model.mu.Unlock()
+			return len(model.suppressed)
+		},
+		func() fyne.CanvasObject {
+			return widget.NewLabel("")
+		},
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			label := obj.(*widget.Label)
+			model.mu.Lock()
+			defer model.mu.Unlock()
+			if id < 0 || id >= len(model.suppressed) {
+				label.SetText("")
+				return
+			}
+			label.SetText(model.suppressed[id])
+		},
+	)
+	return activityList, suppressedList
+}
 
+func buildRecordingsPanel(model *uiModel, deps Dependencies, window fyne.Window, views *uiViews) (fyne.CanvasObject, func()) {
 	recordingsList := widget.NewList(
 		func() int {
 			model.mu.Lock()
@@ -256,44 +1181,7 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 	})
 	stopButton.Disable()
 
-	startRecButton.OnTapped = func() {
-		startRecButton.Disable()
-		go func() {
-			err := deps.StartRecording()
-			fyne.Do(func() {
-				startRecButton.Enable()
-				if err != nil {
-					dialog.ShowError(err, window)
-					return
-				}
-				model.mu.Lock()
-				model.recordingOn = true
-				model.mu.Unlock()
-				startRecButton.Disable()
-				stopRecButton.Enable()
-			})
-		}()
-	}
-
-	stopRecButton.OnTapped = func() {
-		stopRecButton.Disable()
-		go func() {
-			err := deps.StopRecording()
-			fyne.Do(func() {
-				if err != nil {
-					stopRecButton.Enable()
-					dialog.ShowError(err, window)
-					return
-				}
-				model.mu.Lock()
-				model.recordingOn = false
-				model.mu.Unlock()
-				startRecButton.Enable()
-			})
-		}()
-	}
-
-	deleteButton = widget.NewButton("Delete Selected", func() {
+	deleteButton = widget.NewButton("Delete", func() {
 		model.mu.Lock()
 		idx := model.selectedClip
 		var rec Recording
@@ -337,6 +1225,26 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 	})
 	deleteButton.Disable()
 
+	views.playButton = playButton
+	views.stopButton = stopButton
+	views.deleteButton = deleteButton
+	views.recordingsList = recordingsList
+	views.recordingsErr = recordingsErrLabel
+
+	panel := container.NewBorder(
+		container.NewVBox(
+			recordingsErrLabel,
+			container.NewHBox(playButton, stopButton, deleteButton),
+		),
+		nil,
+		nil,
+		nil,
+		recordingsList,
+	)
+	return panel, stopCurrentPlayback
+}
+
+func buildSettingsPanel(deps Dependencies, window fyne.Window) fyne.CanvasObject {
 	ipEntry := widget.NewEntry()
 	ipEntry.SetText(deps.InitialSettings.ScannerIP)
 	pathEntry := widget.NewEntry()
@@ -370,92 +1278,22 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 		}()
 	}
 
-	statusForm := widget.NewForm(
-		widget.NewFormItem("Mode", modeLabel),
-		widget.NewFormItem("View", sourceLabel),
-		widget.NewFormItem("Frequency", freqLabel),
-		widget.NewFormItem("System", systemLabel),
-		widget.NewFormItem("Department", deptLabel),
-		widget.NewFormItem("Channel", channelLabel),
-		widget.NewFormItem("Talkgroup", tgidLabel),
-		widget.NewFormItem("Signal", signalLabel),
-		widget.NewFormItem("Squelch", squelchLabel),
-		widget.NewFormItem("Squelch Level", squelchLvlLabel),
-		widget.NewFormItem("Mute", muteLabel),
-		widget.NewFormItem("Volume", volumeLabel),
-		widget.NewFormItem("Updated", updatedLabel),
-	)
-
-	controls := container.NewVBox(
-		widget.NewLabel("Scanner Control"),
-		container.NewHBox(holdButton, resumeButton),
-		widget.NewSeparator(),
-		widget.NewLabel("Recording Control"),
-		container.NewHBox(startRecButton, stopRecButton),
-	)
-
-	recordingsNote := widget.NewLabel("Local recordings only in this release. Remote scanner-hosted file browsing is not available.")
-	recordingsPanel := container.NewBorder(
-		container.NewVBox(
-			recordingsNote,
-			recordingsErrLabel,
-			container.NewHBox(playButton, stopButton, deleteButton),
-		),
-		nil,
-		nil,
-		nil,
-		recordingsList,
-	)
-
 	settingsForm := widget.NewForm(
 		widget.NewFormItem("Scanner IP", ipEntry),
 		widget.NewFormItem("Recordings Path", pathEntry),
 		widget.NewFormItem("Hang-Time", hangLabel),
 	)
+	return container.NewVBox(settingsForm, saveSettings)
+}
 
-	tabs := container.NewAppTabs(
-		container.NewTabItem("Status", container.NewBorder(nil, controls, nil, nil, statusForm)),
-		container.NewTabItem("Activity", activityList),
-		container.NewTabItem("Recordings", recordingsPanel),
-		container.NewTabItem("Settings", container.NewVBox(settingsForm, saveSettings)),
-	)
-
-	header := container.NewVBox(
-		container.NewHBox(widget.NewLabel("Connection:"), connLabel, reconnectLabel, layout.NewSpacer(), spinner),
-		fatalLabel,
-	)
-
-	content := container.NewBorder(header, nil, nil, nil, tabs)
-	views := uiViews{
-		content:         content,
-		connLabel:       connLabel,
-		reconnectLabel:  reconnectLabel,
-		fatalReason:     fatalLabel,
-		modeLabel:       modeLabel,
-		sourceLabel:     sourceLabel,
-		freqLabel:       freqLabel,
-		systemLabel:     systemLabel,
-		deptLabel:       deptLabel,
-		channelLabel:    channelLabel,
-		tgidLabel:       tgidLabel,
-		signalLabel:     signalLabel,
-		squelchLabel:    squelchLabel,
-		squelchLvlLabel: squelchLvlLabel,
-		muteLabel:       muteLabel,
-		volumeLabel:     volumeLabel,
-		updatedLabel:    updatedLabel,
-		holdButton:      holdButton,
-		resumeButton:    resumeButton,
-		startRecButton:  startRecButton,
-		stopRecButton:   stopRecButton,
-		playButton:      playButton,
-		stopButton:      stopButton,
-		deleteButton:    deleteButton,
-		activityList:    activityList,
-		recordingsList:  recordingsList,
-		recordingsErr:   recordingsErrLabel,
-		recordingsNote:  recordingsNote,
-		spinner:         spinner,
+func parseIntEntry(name string, entry *widget.Entry) (int, error) {
+	value := strings.TrimSpace(entry.Text)
+	if value == "" {
+		return 0, fmt.Errorf("%s is required", name)
 	}
-	return views, stopCurrentPlayback
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", name)
+	}
+	return n, nil
 }

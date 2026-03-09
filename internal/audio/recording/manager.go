@@ -34,6 +34,14 @@ type Metadata struct {
 	Trigger   string
 }
 
+// Status captures current recorder state for UI/telemetry consumers.
+type Status struct {
+	Active    bool
+	StartedAt time.Time
+	Trigger   string
+	Manual    bool
+}
+
 // Config controls recording manager behavior.
 type Config struct {
 	OutputDir     string
@@ -223,6 +231,19 @@ func (m *Manager) UpdateOutputDir(path string) error {
 	m.cfg.OutputDir = path
 	m.mu.Unlock()
 	return nil
+}
+
+// Snapshot returns a copy of the recorder runtime status.
+func (m *Manager) Snapshot() Status {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return Status{
+		Active:    m.writer != nil,
+		StartedAt: m.started,
+		Trigger:   m.trigger,
+		Manual:    m.manual,
+	}
 }
 
 func (m *Manager) begin(at time.Time, status sds200.RuntimeStatus, trigger string) error {

@@ -180,6 +180,8 @@ type RuntimeStatus struct {
 	Squelch     int
 	Mute        bool
 	HoldTarget  HoldTarget
+	Avoided     bool
+	AvoidKnown  bool
 	UpdatedAt   time.Time
 	LastSource  string
 }
@@ -197,9 +199,10 @@ func IsTransmissionActive(status RuntimeStatus) bool {
 }
 
 type HoldTarget struct {
-	Keyword string
-	Arg1    string
-	Arg2    string
+	Keyword     string
+	Arg1        string
+	Arg2        string
+	SystemIndex string
 }
 
 type TelemetryStore struct {
@@ -269,6 +272,7 @@ func (s *TelemetryStore) UpdateFromScannerInfo(info ScannerInfo) RuntimeStatus {
 
 	s.status.Hold = hasHoldState(info.Nodes)
 	s.status.HoldTarget = deriveHoldTarget(info)
+	s.status.Avoided, s.status.AvoidKnown = deriveAvoidState(info)
 
 	if nodes := info.Nodes["ConvFrequency"]; len(nodes) > 0 {
 		cf := nodes[0]
@@ -291,11 +295,51 @@ func (s *TelemetryStore) UpdateFromScannerInfo(info ScannerInfo) RuntimeStatus {
 	return s.status
 }
 
+func deriveAvoidState(info ScannerInfo) (bool, bool) {
+	nodeOrder := []string{
+		"ConvFrequency",
+		"TGID",
+		"SrchFrequency",
+		"CcHitsChannel",
+		"WxChannel",
+		"ToneOutChannel",
+		"Department",
+		"System",
+	}
+	for _, key := range nodeOrder {
+		nodes := info.Nodes[key]
+		if len(nodes) == 0 {
+			continue
+		}
+		avoided, known := parseAvoidValue(nodes[0]["Avoid"])
+		if known {
+			return avoided, true
+		}
+	}
+	return false, false
+}
+
+func parseAvoidValue(value string) (bool, bool) {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "" {
+		return false, false
+	}
+	switch v {
+	case "off", "0", "none", "no", "false":
+		return false, true
+	default:
+		return true, true
+	}
+}
+
 func deriveHoldTarget(info ScannerInfo) HoldTarget {
 	if target, ok := holdTargetFromNode(info.Nodes, "ConvFrequency", "CFREQ", "Index", ""); ok {
 		return target
 	}
 	if target, ok := holdTargetFromNode(info.Nodes, "TGID", "TGID", "TGID", "Site"); ok {
+		if sysNodes := info.Nodes["System"]; len(sysNodes) > 0 {
+			target.SystemIndex = strings.TrimSpace(sysNodes[0]["Index"])
+		}
 		return target
 	}
 	if target, ok := holdTargetFromNode(info.Nodes, "SrchFrequency", "SWS_FREQ", "Freq", "DeptIndex"); ok {

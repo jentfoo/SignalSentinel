@@ -6,11 +6,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/jentfoo/SignalSentinel/internal/gui"
 	"github.com/jentfoo/SignalSentinel/internal/store"
 )
+
+func deepCopyIntSliceMap(src map[string][]int) map[string][]int {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string][]int, len(src))
+	for k, v := range src {
+		dst[k] = append([]int(nil), v...)
+	}
+	return dst
+}
 
 type Options struct {
 	ConfigPath string
@@ -39,6 +54,11 @@ type RecordingDeleteReport struct {
 	Requested int
 	Deleted   []string
 	Failed    []RecordingDeleteFailure
+}
+
+type ProfileScopeSelector struct {
+	FavoritesTag int
+	SystemTag    int
 }
 
 func (r *Runtime) Config() *store.Document {
@@ -109,6 +129,216 @@ func (r *Runtime) EnqueueControl(intent ControlIntent) {
 		return
 	}
 	r.session.EnqueueControl(intent)
+}
+
+func (r *Runtime) ExecuteControl(intent ControlIntent, params ControlParams) error {
+	if r == nil || r.session == nil {
+		return errors.New("runtime session unavailable")
+	}
+	return r.session.ExecuteControl(intent, params)
+}
+
+func (r *Runtime) ReadScanScope(favoritesTag, systemTag int) (gui.ScanScopeSnapshot, error) {
+	if r == nil || r.session == nil {
+		return gui.ScanScopeSnapshot{}, errors.New("runtime session unavailable")
+	}
+	return r.session.ReadScanScope(favoritesTag, systemTag)
+}
+
+func (r *Runtime) ScanProfiles() ([]store.ScanProfile, error) {
+	if r == nil || r.store == nil {
+		return nil, errors.New("runtime store unavailable")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.doc == nil {
+		return nil, errors.New("runtime config missing")
+	}
+	return cloneScanProfiles(r.doc.State.ScanProfiles), nil
+}
+
+func (r *Runtime) SaveScanProfile(profile store.ScanProfile) error {
+	if r == nil || r.store == nil {
+		return errors.New("runtime store unavailable")
+	}
+	return r.UpdateConfig(func(doc *store.Document) error {
+		normalized, err := normalizeScanProfile(profile)
+		if err != nil {
+			return err
+		}
+		normalized.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+
+		for i := range doc.State.ScanProfiles {
+			if strings.EqualFold(strings.TrimSpace(doc.State.ScanProfiles[i].Name), normalized.Name) {
+				existing := doc.State.ScanProfiles[i]
+				updated := store.ScanProfile{
+					Name:               normalized.Name,
+					UpdatedAt:          normalized.UpdatedAt,
+					FavoritesQuickKeys: append([]int(nil), normalized.FavoritesQuickKeys...),
+					ServiceTypes:       append([]int(nil), normalized.ServiceTypes...),
+				}
+				if len(existing.SystemQuickKeys) > 0 || len(normalized.SystemQuickKeys) > 0 {
+					updated.SystemQuickKeys = make(map[string][]int, len(existing.SystemQuickKeys)+len(normalized.SystemQuickKeys))
+					for key, values := range existing.SystemQuickKeys {
+						canonicalKey := strings.TrimSpace(key)
+						parsed, convErr := strconv.Atoi(canonicalKey)
+						if convErr == nil && parsed >= 0 && parsed <= 99 {
+							canonicalKey = strconv.Itoa(parsed)
+						}
+						updated.SystemQuickKeys[canonicalKey] = append([]int(nil), values...)
+					}
+					for key, values := range normalized.SystemQuickKeys {
+						updated.SystemQuickKeys[key] = append([]int(nil), values...)
+					}
+				}
+				if len(existing.DepartmentQuickKeys) > 0 || len(normalized.DepartmentQuickKeys) > 0 {
+					updated.DepartmentQuickKeys = make(map[string][]int, len(existing.DepartmentQuickKeys)+len(normalized.DepartmentQuickKeys))
+					for key, values := range existing.DepartmentQuickKeys {
+						canonicalKey := strings.TrimSpace(key)
+						parts := strings.Split(canonicalKey, ":")
+						if len(parts) == 2 {
+							favTag, favErr := strconv.Atoi(strings.TrimSpace(parts[0]))
+							sysTag, sysErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+							if favErr == nil && sysErr == nil && favTag >= 0 && favTag <= 99 && sysTag >= 0 && sysTag <= 99 {
+								canonicalKey = fmt.Sprintf("%d:%d", favTag, sysTag)
+							}
+						}
+						updated.DepartmentQuickKeys[canonicalKey] = append([]int(nil), values...)
+					}
+					for key, values := range normalized.DepartmentQuickKeys {
+						updated.DepartmentQuickKeys[key] = append([]int(nil), values...)
+					}
+				}
+				doc.State.ScanProfiles[i] = updated
+				return nil
+			}
+		}
+		doc.State.ScanProfiles = append(doc.State.ScanProfiles, normalized)
+		return nil
+	})
+}
+
+func (r *Runtime) DeleteScanProfile(name string) error {
+	if r == nil || r.store == nil {
+		return errors.New("runtime store unavailable")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("scan profile name is required")
+	}
+	return r.UpdateConfig(func(doc *store.Document) error {
+		next := doc.State.ScanProfiles[:0]
+		for _, profile := range doc.State.ScanProfiles {
+			if strings.EqualFold(strings.TrimSpace(profile.Name), name) {
+				continue
+			}
+			next = append(next, profile)
+		}
+		doc.State.ScanProfiles = next
+		return nil
+	})
+}
+
+func (r *Runtime) ApplyScanProfile(name string, scope ProfileScopeSelector) error {
+	if r == nil || r.session == nil {
+		return errors.New("runtime session unavailable")
+	}
+	if err := validateQuickKeyTag("favorites quick key", scope.FavoritesTag); err != nil {
+		return err
+	}
+	if err := validateQuickKeyTag("system quick key", scope.SystemTag); err != nil {
+		return err
+	}
+	profile, err := r.findScanProfile(name)
+	if err != nil {
+		return err
+	}
+
+	if len(profile.FavoritesQuickKeys) > 0 {
+		if err := r.ExecuteControl(IntentSetFavoritesQuickKeys, ControlParams{
+			QuickKeyValues: append([]int(nil), profile.FavoritesQuickKeys...),
+		}); err != nil {
+			return err
+		}
+	}
+	if len(profile.SystemQuickKeys) > 0 {
+		var values []int
+		found := false
+		canonicalKey := strconv.Itoa(scope.FavoritesTag)
+		if selected, ok := profile.SystemQuickKeys[canonicalKey]; ok {
+			values = selected
+			found = true
+		} else {
+			keys := make([]string, 0, len(profile.SystemQuickKeys))
+			for key := range profile.SystemQuickKeys {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				tag, convErr := strconv.Atoi(strings.TrimSpace(key))
+				if convErr != nil || tag != scope.FavoritesTag {
+					continue
+				}
+				values = profile.SystemQuickKeys[key]
+				found = true
+				break
+			}
+		}
+		if found {
+			if err := r.ExecuteControl(IntentSetSystemQuickKeys, ControlParams{
+				ScopeFavoritesTag: scope.FavoritesTag,
+				QuickKeyValues:    append([]int(nil), values...),
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	if len(profile.DepartmentQuickKeys) > 0 {
+		var values []int
+		found := false
+		canonicalKey := fmt.Sprintf("%d:%d", scope.FavoritesTag, scope.SystemTag)
+		if selected, ok := profile.DepartmentQuickKeys[canonicalKey]; ok {
+			values = selected
+			found = true
+		} else {
+			keys := make([]string, 0, len(profile.DepartmentQuickKeys))
+			for key := range profile.DepartmentQuickKeys {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				parts := strings.Split(strings.TrimSpace(key), ":")
+				if len(parts) != 2 {
+					continue
+				}
+				favTag, favErr := strconv.Atoi(strings.TrimSpace(parts[0]))
+				sysTag, sysErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+				if favErr != nil || sysErr != nil || favTag != scope.FavoritesTag || sysTag != scope.SystemTag {
+					continue
+				}
+				values = profile.DepartmentQuickKeys[key]
+				found = true
+				break
+			}
+		}
+		if found {
+			if err := r.ExecuteControl(IntentSetDepartmentQuickKeys, ControlParams{
+				ScopeFavoritesTag: scope.FavoritesTag,
+				ScopeSystemTag:    scope.SystemTag,
+				QuickKeyValues:    append([]int(nil), values...),
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	if len(profile.ServiceTypes) > 0 {
+		if err := r.ExecuteControl(IntentSetServiceTypes, ControlParams{
+			ServiceTypes: append([]int(nil), profile.ServiceTypes...),
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *Runtime) Recordings() ([]store.RecordingEntry, error) {
@@ -297,26 +527,128 @@ func cloneDocument(doc *store.Document) *store.Document {
 	for i := range doc.State.ScanProfiles {
 		profile := doc.State.ScanProfiles[i]
 		cp := store.ScanProfile{
-			Name:               profile.Name,
-			UpdatedAt:          profile.UpdatedAt,
-			FavoritesQuickKeys: append([]int(nil), profile.FavoritesQuickKeys...),
-			ServiceTypes:       append([]int(nil), profile.ServiceTypes...),
-		}
-		if len(profile.SystemQuickKeys) > 0 {
-			cp.SystemQuickKeys = make(map[string][]int, len(profile.SystemQuickKeys))
-			for key, values := range profile.SystemQuickKeys {
-				cp.SystemQuickKeys[key] = append([]int(nil), values...)
-			}
-		}
-		if len(profile.DepartmentQuickKeys) > 0 {
-			cp.DepartmentQuickKeys = make(map[string][]int, len(profile.DepartmentQuickKeys))
-			for key, values := range profile.DepartmentQuickKeys {
-				cp.DepartmentQuickKeys[key] = append([]int(nil), values...)
-			}
+			Name:                profile.Name,
+			UpdatedAt:           profile.UpdatedAt,
+			FavoritesQuickKeys:  append([]int(nil), profile.FavoritesQuickKeys...),
+			ServiceTypes:        append([]int(nil), profile.ServiceTypes...),
+			SystemQuickKeys:     deepCopyIntSliceMap(profile.SystemQuickKeys),
+			DepartmentQuickKeys: deepCopyIntSliceMap(profile.DepartmentQuickKeys),
 		}
 		clone.State.ScanProfiles[i] = cp
 	}
 	return &clone
+}
+
+func cloneScanProfiles(values []store.ScanProfile) []store.ScanProfile {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]store.ScanProfile, len(values))
+	for i := range values {
+		out[i] = values[i]
+		out[i].FavoritesQuickKeys = append([]int(nil), values[i].FavoritesQuickKeys...)
+		out[i].ServiceTypes = append([]int(nil), values[i].ServiceTypes...)
+		out[i].SystemQuickKeys = deepCopyIntSliceMap(values[i].SystemQuickKeys)
+		out[i].DepartmentQuickKeys = deepCopyIntSliceMap(values[i].DepartmentQuickKeys)
+	}
+	return out
+}
+
+func normalizeScanProfile(profile store.ScanProfile) (store.ScanProfile, error) {
+	out := store.ScanProfile{
+		Name: strings.TrimSpace(profile.Name),
+	}
+	if out.Name == "" {
+		return store.ScanProfile{}, errors.New("scan profile name is required")
+	}
+
+	favorites, err := validateBinaryValues(profile.FavoritesQuickKeys, 100, "favorites quick keys")
+	if err != nil {
+		return store.ScanProfile{}, err
+	}
+	out.FavoritesQuickKeys = favorites
+
+	serviceTypes, err := validateBinaryValues(profile.ServiceTypes, 47, "service types")
+	if err != nil {
+		return store.ScanProfile{}, err
+	}
+	out.ServiceTypes = serviceTypes
+
+	if len(profile.SystemQuickKeys) > 0 {
+		out.SystemQuickKeys = make(map[string][]int, len(profile.SystemQuickKeys))
+		for key, values := range profile.SystemQuickKeys {
+			cleanKey := strings.TrimSpace(key)
+			if cleanKey == "" {
+				return store.ScanProfile{}, errors.New("system quick key profile key is required")
+			}
+			parsed, err := strconv.Atoi(cleanKey)
+			if err != nil {
+				return store.ScanProfile{}, fmt.Errorf("invalid system quick key profile key %q", cleanKey)
+			}
+			if err := validateQuickKeyTag("system quick key profile key", parsed); err != nil {
+				return store.ScanProfile{}, err
+			}
+			normalized, normErr := validateBinaryValues(values, 100, "system quick keys")
+			if normErr != nil {
+				return store.ScanProfile{}, normErr
+			}
+			out.SystemQuickKeys[strconv.Itoa(parsed)] = normalized
+		}
+	}
+	if len(profile.DepartmentQuickKeys) > 0 {
+		out.DepartmentQuickKeys = make(map[string][]int, len(profile.DepartmentQuickKeys))
+		for key, values := range profile.DepartmentQuickKeys {
+			cleanKey := strings.TrimSpace(key)
+			if cleanKey == "" {
+				return store.ScanProfile{}, errors.New("department quick key profile key is required")
+			}
+			parts := strings.Split(cleanKey, ":")
+			if len(parts) != 2 {
+				return store.ScanProfile{}, fmt.Errorf("invalid department quick key profile key %q", cleanKey)
+			}
+			favTag, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+			if err != nil {
+				return store.ScanProfile{}, fmt.Errorf("invalid department quick key profile key %q", cleanKey)
+			}
+			sysTag, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if err != nil {
+				return store.ScanProfile{}, fmt.Errorf("invalid department quick key profile key %q", cleanKey)
+			}
+			if err := validateQuickKeyTag("department quick key profile favorites tag", favTag); err != nil {
+				return store.ScanProfile{}, err
+			}
+			if err := validateQuickKeyTag("department quick key profile system tag", sysTag); err != nil {
+				return store.ScanProfile{}, err
+			}
+			normalized, normErr := validateBinaryValues(values, 100, "department quick keys")
+			if normErr != nil {
+				return store.ScanProfile{}, normErr
+			}
+			out.DepartmentQuickKeys[fmt.Sprintf("%d:%d", favTag, sysTag)] = normalized
+		}
+	}
+
+	return out, nil
+}
+
+func (r *Runtime) findScanProfile(name string) (store.ScanProfile, error) {
+	if r == nil || r.store == nil {
+		return store.ScanProfile{}, errors.New("runtime store unavailable")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return store.ScanProfile{}, errors.New("scan profile name is required")
+	}
+	profiles, err := r.ScanProfiles()
+	if err != nil {
+		return store.ScanProfile{}, err
+	}
+	for _, profile := range profiles {
+		if strings.EqualFold(strings.TrimSpace(profile.Name), name) {
+			return profile, nil
+		}
+	}
+	return store.ScanProfile{}, fmt.Errorf("scan profile not found: %s", name)
 }
 
 func StartRuntime(ctx context.Context, opts Options) (*Runtime, error) {

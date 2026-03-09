@@ -310,6 +310,33 @@ func TestManagerManualLifecycle(t *testing.T) {
 	})
 }
 
+func TestManagerSnapshot(t *testing.T) {
+	t.Parallel()
+
+	t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+	m := NewManager(Config{
+		OutputDir: filepath.Join(t.TempDir(), "clips"),
+	})
+
+	snap := m.Snapshot()
+	assert.False(t, snap.Active)
+	assert.False(t, snap.Manual)
+	assert.True(t, snap.StartedAt.IsZero())
+
+	require.NoError(t, m.StartManual(idleStatus(), t0))
+	snap = m.Snapshot()
+	assert.True(t, snap.Active)
+	assert.True(t, snap.Manual)
+	assert.Equal(t, t0, snap.StartedAt)
+	assert.Equal(t, "manual", snap.Trigger)
+
+	require.NoError(t, m.StopManual(t0.Add(2*time.Second)))
+	snap = m.Snapshot()
+	assert.False(t, snap.Active)
+	assert.False(t, snap.Manual)
+	assert.True(t, snap.StartedAt.IsZero())
+}
+
 func TestManagerIntegrationFlow(t *testing.T) {
 	t.Parallel()
 

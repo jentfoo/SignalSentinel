@@ -13,11 +13,19 @@ func TestParseSTS(t *testing.T) {
 	tests := []struct {
 		name    string
 		fields  []string
+		want    []DisplayLine
 		wantErr bool
 	}{
 		{
 			name:   "valid_lines",
 			fields: []string{"00000", "line1", "mode1", "line2", "mode2", "line3", "mode3", "line4", "mode4", "line5", "mode5"},
+			want: []DisplayLine{
+				{Text: "line1", Mode: "mode1"},
+				{Text: "line2", Mode: "mode2"},
+				{Text: "line3", Mode: "mode3"},
+				{Text: "line4", Mode: "mode4"},
+				{Text: "line5", Mode: "mode5"},
+			},
 		},
 		{
 			name:    "invalid_dsp_form",
@@ -47,6 +55,7 @@ func TestParseSTS(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.fields[0], got.DisplayForm)
 			assert.Len(t, got.Lines, len(tt.fields[0]))
+			assert.Equal(t, tt.want, got.Lines)
 		})
 	}
 }
@@ -127,134 +136,172 @@ func TestParseScannerInfoXML(t *testing.T) {
 func TestTelemetryStoreSnapshot(t *testing.T) {
 	t.Parallel()
 
-	store := NewTelemetryStore()
-	snap := store.Snapshot()
-	assert.False(t, snap.Connected)
+	t.Run("defaults_disconnected", func(t *testing.T) {
+		store := NewTelemetryStore()
+		snap := store.Snapshot()
+		assert.False(t, snap.Connected)
+	})
 }
 
 func TestTelemetryStoreUpdateFromSTS(t *testing.T) {
 	t.Parallel()
 
-	store := NewTelemetryStore()
-	sts := StatusSTS{
-		DisplayForm: "00000",
-		Lines: []DisplayLine{
-			{Text: "Dispatch A", Mode: " "},
-		},
-	}
-	updated := store.UpdateFromSTS(sts)
-	assert.Equal(t, cmdSTS, updated.LastSource)
-	assert.Equal(t, "Dispatch A", updated.Channel)
+	t.Run("updates_channel", func(t *testing.T) {
+		store := NewTelemetryStore()
+		sts := StatusSTS{
+			DisplayForm: "00000",
+			Lines: []DisplayLine{
+				{Text: "Dispatch A", Mode: " "},
+			},
+		}
+		updated := store.UpdateFromSTS(sts)
+		assert.Equal(t, cmdSTS, updated.LastSource)
+		assert.Equal(t, "Dispatch A", updated.Channel)
+	})
 }
 
 func TestTelemetryStoreUpdateFromGST(t *testing.T) {
 	t.Parallel()
 
-	store := NewTelemetryStore()
-	gst := StatusGST{
-		StatusSTS: StatusSTS{DisplayForm: "00000"},
-		Mute:      "Mute",
-		Frequency: "851.0125",
-		ColorMode: "0",
-		WFMode:    "1",
-		Center:    "851.0125",
-		Lower:     "850.0000",
-		Upper:     "852.0000",
-		Mod:       "NFM",
-		FFTSize:   "3",
-		LED1:      "1",
-		LED2:      "0",
-	}
-	updated := store.UpdateFromGST(gst)
-	assert.Equal(t, cmdGST, updated.LastSource)
-	assert.Equal(t, "851.0125", updated.Frequency)
-	assert.True(t, updated.Mute)
-	assert.True(t, updated.Connected)
-	assert.False(t, updated.SquelchOpen)
+	t.Run("updates_status", func(t *testing.T) {
+		store := NewTelemetryStore()
+		gst := StatusGST{
+			StatusSTS: StatusSTS{DisplayForm: "00000"},
+			Mute:      "Mute",
+			Frequency: "851.0125",
+			ColorMode: "0",
+			WFMode:    "1",
+			Center:    "851.0125",
+			Lower:     "850.0000",
+			Upper:     "852.0000",
+			Mod:       "NFM",
+			FFTSize:   "3",
+			LED1:      "1",
+			LED2:      "0",
+		}
+		updated := store.UpdateFromGST(gst)
+		assert.Equal(t, cmdGST, updated.LastSource)
+		assert.Equal(t, "851.0125", updated.Frequency)
+		assert.True(t, updated.Mute)
+		assert.True(t, updated.Connected)
+		assert.False(t, updated.SquelchOpen)
+	})
 }
 
 func TestTelemetryStoreUpdateFromScannerInfo(t *testing.T) {
 	t.Parallel()
 
-	store := NewTelemetryStore()
-	info := ScannerInfo{
-		Mode:    "Scan Mode",
-		VScreen: "conventional_scan",
-		Property: map[string]string{
-			"VOL":  "11",
-			"SQL":  "5",
-			"Sig":  "3",
-			"Mute": "Unmute",
-			"F":    "Off",
-		},
-		Nodes: map[string][]map[string]string{
-			"System":        {{"Name": "County"}},
-			"Department":    {{"Name": "Fire"}},
-			"ConvFrequency": {{"Name": "Fire Ops", "Freq": "155.2200", "Index": "120", "Hold": "On"}},
-		},
-	}
-	updated := store.UpdateFromScannerInfo(info)
-	assert.True(t, updated.Connected)
-	assert.Equal(t, "County", updated.System)
-	assert.Equal(t, "Fire", updated.Department)
-	assert.Equal(t, "Fire Ops", updated.Channel)
-	assert.Equal(t, 11, updated.Volume)
-	assert.True(t, updated.Hold)
-	assert.True(t, updated.SquelchOpen)
-	assert.Equal(t, "CFREQ", updated.HoldTarget.Keyword)
-	assert.Equal(t, "120", updated.HoldTarget.Arg1)
+	t.Run("conventional", func(t *testing.T) {
+		store := NewTelemetryStore()
+		info := ScannerInfo{
+			Mode:    "Scan Mode",
+			VScreen: "conventional_scan",
+			Property: map[string]string{
+				"VOL":  "11",
+				"SQL":  "5",
+				"Sig":  "3",
+				"Mute": "Unmute",
+				"F":    "Off",
+			},
+			Nodes: map[string][]map[string]string{
+				"System":        {{"Name": "County"}},
+				"Department":    {{"Name": "Fire"}},
+				"ConvFrequency": {{"Name": "Fire Ops", "Freq": "155.2200", "Index": "120", "Hold": "On", "Avoid": "Off"}},
+			},
+		}
+		updated := store.UpdateFromScannerInfo(info)
+		assert.True(t, updated.Connected)
+		assert.Equal(t, "County", updated.System)
+		assert.Equal(t, "Fire", updated.Department)
+		assert.Equal(t, "Fire Ops", updated.Channel)
+		assert.Equal(t, 11, updated.Volume)
+		assert.True(t, updated.Hold)
+		assert.True(t, updated.SquelchOpen)
+		assert.Equal(t, "CFREQ", updated.HoldTarget.Keyword)
+		assert.Equal(t, "120", updated.HoldTarget.Arg1)
+		assert.True(t, updated.AvoidKnown)
+		assert.False(t, updated.Avoided)
+	})
 }
 
 func TestTelemetryStoreUpdateFromScannerInfoTGID(t *testing.T) {
 	t.Parallel()
 
-	store := NewTelemetryStore()
-	info := ScannerInfo{
-		Mode:    "Scan Mode",
-		VScreen: "trunk_scan",
-		Property: map[string]string{
-			"VOL":  "15",
-			"SQL":  "3",
-			"Sig":  "5",
-			"Mute": "Unmute",
-		},
-		Nodes: map[string][]map[string]string{
-			"System":     {{"Name": "County P25"}},
-			"Department": {{"Name": "Law Enforcement"}},
-			"TGID":       {{"Name": "Dispatch 1", "TGID": "100", "Site": "2", "Hold": "On"}},
-		},
-	}
-	updated := store.UpdateFromScannerInfo(info)
-	assert.True(t, updated.Connected)
-	assert.Equal(t, "County P25", updated.System)
-	assert.Equal(t, "Law Enforcement", updated.Department)
-	assert.Equal(t, "Dispatch 1", updated.Channel)
-	assert.Equal(t, "100", updated.Talkgroup)
-	assert.True(t, updated.Hold)
-	assert.Equal(t, 15, updated.Volume)
-	assert.Equal(t, 5, updated.Signal)
-	assert.Equal(t, "TGID", updated.HoldTarget.Keyword)
-	assert.Equal(t, "100", updated.HoldTarget.Arg1)
-	assert.Equal(t, "2", updated.HoldTarget.Arg2)
+	t.Run("trunked_tgid", func(t *testing.T) {
+		store := NewTelemetryStore()
+		info := ScannerInfo{
+			Mode:    "Scan Mode",
+			VScreen: "trunk_scan",
+			Property: map[string]string{
+				"VOL":  "15",
+				"SQL":  "3",
+				"Sig":  "5",
+				"Mute": "Unmute",
+			},
+			Nodes: map[string][]map[string]string{
+				"System":     {{"Name": "County P25"}},
+				"Department": {{"Name": "Law Enforcement"}},
+				"TGID":       {{"Name": "Dispatch 1", "TGID": "100", "Site": "2", "Hold": "On", "Avoid": "T-Avoid"}},
+			},
+		}
+		updated := store.UpdateFromScannerInfo(info)
+		assert.True(t, updated.Connected)
+		assert.Equal(t, "County P25", updated.System)
+		assert.Equal(t, "Law Enforcement", updated.Department)
+		assert.Equal(t, "Dispatch 1", updated.Channel)
+		assert.Equal(t, "100", updated.Talkgroup)
+		assert.True(t, updated.Hold)
+		assert.Equal(t, 15, updated.Volume)
+		assert.Equal(t, 5, updated.Signal)
+		assert.Equal(t, "TGID", updated.HoldTarget.Keyword)
+		assert.Equal(t, "100", updated.HoldTarget.Arg1)
+		assert.Equal(t, "2", updated.HoldTarget.Arg2)
+		assert.True(t, updated.AvoidKnown)
+		assert.True(t, updated.Avoided)
+	})
+}
+
+func TestTelemetryStoreUpdateFromScannerInfoAvoidFallsThroughEmptyNodeValue(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty_avoid_fallback", func(t *testing.T) {
+		store := NewTelemetryStore()
+		info := ScannerInfo{
+			Mode:    "Scan Mode",
+			VScreen: "trunk_scan",
+			Property: map[string]string{
+				"Mute": "Unmute",
+			},
+			Nodes: map[string][]map[string]string{
+				"ConvFrequency": {{"Name": "Placeholder", "Avoid": ""}},
+				"TGID":          {{"Name": "Dispatch 1", "TGID": "100", "Site": "2", "Hold": "On", "Avoid": "T-Avoid"}},
+			},
+		}
+		updated := store.UpdateFromScannerInfo(info)
+		assert.True(t, updated.AvoidKnown)
+		assert.True(t, updated.Avoided)
+	})
 }
 
 func TestTelemetryStoreUpdateFromScannerInfoHoldOff(t *testing.T) {
 	t.Parallel()
 
-	store := NewTelemetryStore()
-	info := ScannerInfo{
-		Mode:    "Scan Mode",
-		VScreen: "conventional_scan",
-		Property: map[string]string{
-			"Mute": "Mute",
-		},
-		Nodes: map[string][]map[string]string{
-			"ConvFrequency": {{"Name": "Fire Ops", "Freq": "155.2200", "Hold": "Off"}},
-		},
-	}
-	updated := store.UpdateFromScannerInfo(info)
-	assert.False(t, updated.Hold)
-	assert.False(t, updated.SquelchOpen)
+	t.Run("hold_off", func(t *testing.T) {
+		store := NewTelemetryStore()
+		info := ScannerInfo{
+			Mode:    "Scan Mode",
+			VScreen: "conventional_scan",
+			Property: map[string]string{
+				"Mute": "Mute",
+			},
+			Nodes: map[string][]map[string]string{
+				"ConvFrequency": {{"Name": "Fire Ops", "Freq": "155.2200", "Hold": "Off"}},
+			},
+		}
+		updated := store.UpdateFromScannerInfo(info)
+		assert.False(t, updated.Hold)
+		assert.False(t, updated.SquelchOpen)
+	})
 }
 
 func TestParseGCSResponse(t *testing.T) {

@@ -20,7 +20,7 @@ func TestRun(t *testing.T) {
 			close(ch)
 			return ch
 		},
-		EnqueueControl: func(ControlIntent) {},
+		ExecuteControl: func(ControlRequest) ControlResult { return ControlResult{} },
 		StartRecording: func() error {
 			return nil
 		},
@@ -53,7 +53,7 @@ func TestRun(t *testing.T) {
 		{
 			name: "requires_control_callback",
 			mutate: func(deps *Dependencies) {
-				deps.EnqueueControl = nil
+				deps.ExecuteControl = nil
 			},
 			wantErr: "gui control callback is required",
 		},

@@ -20,6 +20,7 @@ type CapabilitySpec struct {
 	ExpertOnly         bool
 	RequiresConnected  bool
 	RequiresHold       bool
+	RequiresNotHold    bool
 	RequiresHoldTarget bool
 }
 
@@ -34,10 +35,10 @@ type CapabilityAvailability struct {
 
 func DefaultCapabilityRegistry() map[ControlIntent]CapabilitySpec {
 	return map[ControlIntent]CapabilitySpec{
-		IntentHold:                   {Command: "HLD", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true, RequiresHoldTarget: true},
+		IntentHold:                   {Command: "HLD", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true, RequiresNotHold: true, RequiresHoldTarget: true},
 		IntentResumeScan:             {Command: "JPM", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true, RequiresHold: true},
-		IntentNext:                   {Command: "NXT", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true},
-		IntentPrevious:               {Command: "PRV", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true},
+		IntentNext:                   {Command: "NXT", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true, RequiresHoldTarget: true},
+		IntentPrevious:               {Command: "PRV", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true, RequiresHoldTarget: true},
 		IntentJumpNumberTag:          {Command: "JNT", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true},
 		IntentQuickSearchHold:        {Command: "QSH", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true},
 		IntentJumpMode:               {Command: "JPM", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true},
@@ -47,8 +48,8 @@ func DefaultCapabilityRegistry() map[ControlIntent]CapabilitySpec {
 		IntentSetServiceTypes:        {Command: "SVC", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true},
 		IntentSetRecordOn:            {Command: "URC", Safety: CapabilityDisruptive, DefaultEnabled: true, RequiresConnected: true},
 		IntentSetRecordOff:           {Command: "URC", Safety: CapabilityDisruptive, DefaultEnabled: true, RequiresConnected: true},
-		IntentAvoid:                  {Command: "AVD", Safety: CapabilityDisruptive, DefaultEnabled: true, RequiresConnected: true},
-		IntentUnavoid:                {Command: "AVD", Safety: CapabilityDisruptive, DefaultEnabled: true, RequiresConnected: true},
+		IntentAvoid:                  {Command: "AVD", Safety: CapabilityDisruptive, DefaultEnabled: true, RequiresConnected: true, RequiresHoldTarget: true},
+		IntentUnavoid:                {Command: "AVD", Safety: CapabilityDisruptive, DefaultEnabled: true, RequiresConnected: true, RequiresHoldTarget: true},
 		IntentSetVolume:              {Command: "VOL", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true},
 		IntentSetSquelch:             {Command: "SQL", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true},
 		IntentMenuEnter:              {Command: "MNU", Safety: CapabilityDisruptive, DefaultEnabled: false, ExpertOnly: true, RequiresConnected: true},
@@ -112,6 +113,9 @@ func EvaluateCapabilities(registry map[ControlIntent]CapabilitySpec, state Runti
 		}
 		if spec.RequiresHold && !state.Scanner.Hold {
 			disable("scanner is not in hold mode")
+		}
+		if spec.RequiresNotHold && state.Scanner.Hold {
+			disable("scanner is already in hold mode")
 		}
 		if spec.RequiresHoldTarget {
 			target := state.Scanner.HoldTarget

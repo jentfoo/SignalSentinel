@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/jentfoo/SignalSentinel/internal/gui"
 	"github.com/jentfoo/SignalSentinel/internal/sds200"
 	"github.com/jentfoo/SignalSentinel/internal/store"
 )
@@ -17,7 +19,22 @@ type SDS200Client interface {
 	Resync() (sds200.RuntimeStatus, error)
 	StartPushScannerInfo(intervalMS int) error
 	Hold(tkw, x1, x2 string) error
+	Next(tkw, x1, x2 string, count int) error
+	Previous(tkw, x1, x2 string, count int) error
+	Avoid(tkw, x1, x2 string, status int) error
+	JumpNumberTag(flTag, sysTag, chanTag int) error
+	QuickSearchHold(freqHz int) error
 	JumpMode(mode, index string) error
+	GetFavoritesQuickKeys() (sds200.QuickKeyState, error)
+	SetFavoritesQuickKeys(state sds200.QuickKeyState) error
+	GetSystemQuickKeys(favQK int) (sds200.QuickKeyState, error)
+	SetSystemQuickKeys(favQK int, state sds200.QuickKeyState) error
+	GetDepartmentQuickKeys(favQK, sysQK int) (sds200.QuickKeyState, error)
+	SetDepartmentQuickKeys(favQK, sysQK int, state sds200.QuickKeyState) error
+	GetServiceTypes() ([]int, error)
+	SetServiceTypes(values []int) error
+	SetVolume(level int) error
+	SetSquelch(level int) error
 	OnTelemetry(handler func(sds200.RuntimeStatus))
 	TelemetrySnapshot() sds200.RuntimeStatus
 	Close() error
@@ -35,7 +52,6 @@ type SessionConfig struct {
 	HealthCheckInterval time.Duration
 	ReconnectDelay      time.Duration
 	MaxReconnectFails   int
-	Logger              *log.Logger
 	Factory             SDS200Factory
 }
 
@@ -71,9 +87,6 @@ func (c SessionConfig) withDefaults() SessionConfig {
 	if c.MaxReconnectFails <= 0 {
 		c.MaxReconnectFails = 5
 	}
-	if c.Logger == nil {
-		c.Logger = log.New(os.Stderr, "", log.LstdFlags|log.LUTC)
-	}
 	if c.Factory == nil {
 		c.Factory = defaultClientFactory
 	}
@@ -86,7 +99,7 @@ type ScannerSession struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu     sync.Mutex
+	mu     sync.RWMutex
 	client SDS200Client
 
 	fatalErr chan error
@@ -95,10 +108,31 @@ type ScannerSession struct {
 	stateHub *stateHub
 
 	controlMu sync.Mutex
-	controlCh chan ControlIntent
+	controlCh chan controlRequest
 }
 
 type ControlIntent string
+
+type ControlParams struct {
+	FavoritesTag      int
+	SystemTag         int
+	ChannelTag        int
+	FrequencyHz       int
+	JumpMode          string
+	JumpIndex         string
+	ScopeFavoritesTag int
+	ScopeSystemTag    int
+	QuickKeyValues    []int
+	ServiceTypes      []int
+	Volume            int
+	Squelch           int
+}
+
+type controlRequest struct {
+	intent ControlIntent
+	params ControlParams
+	result chan error
+}
 
 const (
 	IntentResumeScan ControlIntent = "resume_scan"
@@ -151,7 +185,7 @@ func NewScannerSession(parent context.Context, cfg SessionConfig, hub *stateHub)
 		cancel:    cancel,
 		fatalErr:  make(chan error, 1),
 		stateHub:  hub,
-		controlCh: make(chan ControlIntent, 1),
+		controlCh: make(chan controlRequest, 1),
 	}
 	if err := s.connectAndSync(); err != nil {
 		cancel()
@@ -185,16 +219,48 @@ func (s *ScannerSession) EnqueueControl(intent ControlIntent) {
 	if s == nil {
 		return
 	}
+	if s.controlCh == nil {
+		return
+	}
+	req := controlRequest{intent: intent}
 	s.controlMu.Lock()
 	select {
-	case <-s.controlCh:
+	case stale := <-s.controlCh:
+		if stale.result != nil {
+			stale.result <- errors.New("control request superseded")
+		}
 	default:
 	}
 	select {
-	case s.controlCh <- intent:
+	case s.controlCh <- req:
 	case <-s.ctx.Done():
 	}
 	s.controlMu.Unlock()
+}
+
+func (s *ScannerSession) ExecuteControl(intent ControlIntent, params ControlParams) error {
+	if s == nil {
+		return errors.New("scanner session unavailable")
+	}
+	if s.controlCh == nil {
+		return errors.New("scanner session unavailable")
+	}
+	req := controlRequest{
+		intent: intent,
+		params: params,
+		result: make(chan error, 1),
+	}
+	select {
+	case s.controlCh <- req:
+	case <-s.ctx.Done():
+		return errors.New("scanner session unavailable")
+	}
+	select {
+	case err := <-req.result:
+		return err
+	case <-s.ctx.Done():
+		return errors.New("scanner session unavailable")
+	}
 }
 
 func (s *ScannerSession) supervise() {
@@ -210,7 +276,7 @@ func (s *ScannerSession) supervise() {
 		case <-ticker.C:
 			if err := s.healthCheck(); err != nil {
 				consecutiveFails++
-				s.logf("scanner health check failed (%d/%d): %v", consecutiveFails, s.cfg.MaxReconnectFails, err)
+				log.Printf("session: scanner health check failed (%d/%d): %v", consecutiveFails, s.cfg.MaxReconnectFails, err)
 				if consecutiveFails >= s.cfg.MaxReconnectFails {
 					s.signalFatal(fmt.Errorf("scanner reconnect budget exceeded: %w", err))
 					return
@@ -228,9 +294,9 @@ func (s *ScannerSession) supervise() {
 }
 
 func (s *ScannerSession) healthCheck() error {
-	s.mu.Lock()
+	s.mu.RLock()
 	c := s.client
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	if c == nil {
 		return s.connectAndSync()
 	}
@@ -285,7 +351,7 @@ func (s *ScannerSession) connectAndSync() error {
 		_ = old.Close()
 	}
 	s.publishScannerState(status)
-	s.logf("scanner session connected and synchronized")
+	log.Printf("session: scanner session connected and synchronized")
 	return nil
 }
 
@@ -295,18 +361,22 @@ func (s *ScannerSession) controlLoop() {
 		select {
 		case <-s.ctx.Done():
 			return
-		case intent := <-s.controlCh:
-			if err := s.executeIntent(intent); err != nil {
-				s.logf("control intent %q failed: %v", intent, err)
+		case req := <-s.controlCh:
+			err := s.executeIntent(req.intent, req.params)
+			if err != nil {
+				log.Printf("session: control intent %q failed: %v", req.intent, err)
+			}
+			if req.result != nil {
+				req.result <- err
 			}
 		}
 	}
 }
 
-func (s *ScannerSession) executeIntent(intent ControlIntent) error {
-	s.mu.Lock()
+func (s *ScannerSession) executeIntent(intent ControlIntent, params ControlParams) error {
+	s.mu.RLock()
 	client := s.client
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	if client == nil {
 		return errors.New("scanner client unavailable")
 	}
@@ -321,9 +391,237 @@ func (s *ScannerSession) executeIntent(intent ControlIntent) error {
 			return errors.New("hold target unavailable for current scanner state")
 		}
 		return client.Hold(target.Keyword, target.Arg1, target.Arg2)
+	case IntentNext:
+		target, err := navigationTarget(client.TelemetrySnapshot())
+		if err != nil {
+			return err
+		}
+		return client.Next(target.Keyword, target.Arg1, target.Arg2, 1)
+	case IntentPrevious:
+		target, err := navigationTarget(client.TelemetrySnapshot())
+		if err != nil {
+			return err
+		}
+		return client.Previous(target.Keyword, target.Arg1, target.Arg2, 1)
+	case IntentJumpNumberTag:
+		if params.FavoritesTag < 0 || params.FavoritesTag > 99 {
+			return fmt.Errorf("favorites tag must be in range 0-99 (got %d)", params.FavoritesTag)
+		}
+		if params.SystemTag < 0 || params.SystemTag > 99 {
+			return fmt.Errorf("system tag must be in range 0-99 (got %d)", params.SystemTag)
+		}
+		if params.ChannelTag < 0 || params.ChannelTag > 999 {
+			return fmt.Errorf("channel tag must be in range 0-999 (got %d)", params.ChannelTag)
+		}
+		return client.JumpNumberTag(params.FavoritesTag, params.SystemTag, params.ChannelTag)
+	case IntentQuickSearchHold:
+		if params.FrequencyHz <= 0 {
+			return errors.New("quick search frequency must be > 0")
+		}
+		return client.QuickSearchHold(params.FrequencyHz)
+	case IntentJumpMode:
+		mode := strings.TrimSpace(params.JumpMode)
+		if mode == "" {
+			mode = "SCN_MODE"
+		}
+		index := strings.TrimSpace(params.JumpIndex)
+		if index == "" {
+			index = "0"
+		}
+		return client.JumpMode(mode, index)
+	case IntentAvoid:
+		status := client.TelemetrySnapshot()
+		target := status.HoldTarget
+		if target.Keyword == "" || target.Arg1 == "" {
+			return errors.New("avoid target unavailable for current scanner state")
+		}
+		avoidTarget := toAvoidTarget(target)
+		return client.Avoid(avoidTarget.Keyword, avoidTarget.Arg1, avoidTarget.Arg2, 2)
+	case IntentUnavoid:
+		status := client.TelemetrySnapshot()
+		target := status.HoldTarget
+		if target.Keyword == "" || target.Arg1 == "" {
+			return errors.New("unavoid target unavailable for current scanner state")
+		}
+		avoidTarget := toAvoidTarget(target)
+		return client.Avoid(avoidTarget.Keyword, avoidTarget.Arg1, avoidTarget.Arg2, 3)
+	case IntentSetFavoritesQuickKeys:
+		values, err := validateQuickKeyValues(params.QuickKeyValues, 100, "favorites quick keys")
+		if err != nil {
+			return err
+		}
+		state := quickKeyValuesToState(values)
+		if err := client.SetFavoritesQuickKeys(state); err != nil {
+			return err
+		}
+		return s.resyncAfterScopeChange(client)
+	case IntentSetSystemQuickKeys:
+		if err := validateQuickKeyTag("favorites quick key", params.ScopeFavoritesTag); err != nil {
+			return err
+		}
+		values, err := validateQuickKeyValues(params.QuickKeyValues, 100, "system quick keys")
+		if err != nil {
+			return err
+		}
+		state := quickKeyValuesToState(values)
+		if err := client.SetSystemQuickKeys(params.ScopeFavoritesTag, state); err != nil {
+			return err
+		}
+		return s.resyncAfterScopeChange(client)
+	case IntentSetDepartmentQuickKeys:
+		if err := validateQuickKeyTag("favorites quick key", params.ScopeFavoritesTag); err != nil {
+			return err
+		}
+		if err := validateQuickKeyTag("system quick key", params.ScopeSystemTag); err != nil {
+			return err
+		}
+		values, err := validateQuickKeyValues(params.QuickKeyValues, 100, "department quick keys")
+		if err != nil {
+			return err
+		}
+		state := quickKeyValuesToState(values)
+		if err := client.SetDepartmentQuickKeys(params.ScopeFavoritesTag, params.ScopeSystemTag, state); err != nil {
+			return err
+		}
+		return s.resyncAfterScopeChange(client)
+	case IntentSetServiceTypes:
+		values, err := validateBinaryValues(params.ServiceTypes, 47, "service types")
+		if err != nil {
+			return err
+		}
+		if err := client.SetServiceTypes(values); err != nil {
+			return err
+		}
+		return s.resyncAfterScopeChange(client)
+	case IntentSetVolume:
+		return client.SetVolume(params.Volume)
+	case IntentSetSquelch:
+		return client.SetSquelch(params.Squelch)
 	default:
 		return fmt.Errorf("unsupported control intent: %s", intent)
 	}
+}
+
+func (s *ScannerSession) ReadScanScope(favoritesTag, systemTag int) (gui.ScanScopeSnapshot, error) {
+	if s == nil {
+		return gui.ScanScopeSnapshot{}, errors.New("scanner session unavailable")
+	}
+	if err := validateQuickKeyTag("favorites quick key", favoritesTag); err != nil {
+		return gui.ScanScopeSnapshot{}, err
+	}
+	if err := validateQuickKeyTag("system quick key", systemTag); err != nil {
+		return gui.ScanScopeSnapshot{}, err
+	}
+
+	s.mu.RLock()
+	client := s.client
+	s.mu.RUnlock()
+	if client == nil {
+		return gui.ScanScopeSnapshot{}, errors.New("scanner client unavailable")
+	}
+
+	favoritesState, err := client.GetFavoritesQuickKeys()
+	if err != nil {
+		return gui.ScanScopeSnapshot{}, err
+	}
+	systemState, err := client.GetSystemQuickKeys(favoritesTag)
+	if err != nil {
+		return gui.ScanScopeSnapshot{}, err
+	}
+	departmentState, err := client.GetDepartmentQuickKeys(favoritesTag, systemTag)
+	if err != nil {
+		return gui.ScanScopeSnapshot{}, err
+	}
+	serviceTypes, err := client.GetServiceTypes()
+	if err != nil {
+		return gui.ScanScopeSnapshot{}, err
+	}
+	serviceTypesCopy := append([]int(nil), serviceTypes...)
+
+	return gui.ScanScopeSnapshot{
+		FavoritesTag:        favoritesTag,
+		SystemTag:           systemTag,
+		FavoritesQuickKeys:  quickKeyStateToValues(favoritesState),
+		SystemQuickKeys:     quickKeyStateToValues(systemState),
+		DepartmentQuickKeys: quickKeyStateToValues(departmentState),
+		ServiceTypes:        serviceTypesCopy,
+	}, nil
+}
+
+func navigationTarget(status sds200.RuntimeStatus) (sds200.HoldTarget, error) {
+	target := status.HoldTarget
+	if target.Keyword == "" || target.Arg1 == "" {
+		return sds200.HoldTarget{}, errors.New("navigation target unavailable for current scanner state")
+	}
+	return target, nil
+}
+
+func toAvoidTarget(target sds200.HoldTarget) sds200.HoldTarget {
+	switch target.Keyword {
+	case "SWS_FREQ", "CS_FREQ", "QS_FREQ":
+		target.Keyword = "AFREQ"
+		target.Arg2 = ""
+	case "TGID":
+		target.Keyword = "ATGID"
+		target.Arg2 = target.SystemIndex
+	case "DEPT":
+		target.Arg2 = ""
+	}
+	return target
+}
+
+func (s *ScannerSession) resyncAfterScopeChange(client SDS200Client) error {
+	status, err := client.Resync()
+	if err != nil {
+		return fmt.Errorf("scope change applied but telemetry resync failed: %w", err)
+	}
+	s.publishScannerState(status)
+	return nil
+}
+
+func validateQuickKeyTag(name string, value int) error {
+	if value < 0 || value > 99 {
+		return fmt.Errorf("%s must be in range 0-99 (got %d)", name, value)
+	}
+	return nil
+}
+
+func validateQuickKeyValues(values []int, expected int, name string) ([]int, error) {
+	if len(values) != expected {
+		return nil, fmt.Errorf("%s must contain %d values (got %d)", name, expected, len(values))
+	}
+	out := make([]int, expected)
+	for i, value := range values {
+		if value != 0 && value != 1 && value != 2 {
+			return nil, fmt.Errorf("%s[%d] must be 0, 1, or 2 (got %d)", name, i, value)
+		}
+		out[i] = value
+	}
+	return out, nil
+}
+
+func validateBinaryValues(values []int, expected int, name string) ([]int, error) {
+	if len(values) != expected {
+		return nil, fmt.Errorf("%s must contain %d values (got %d)", name, expected, len(values))
+	}
+	out := make([]int, expected)
+	for i, value := range values {
+		if value != 0 && value != 1 {
+			return nil, fmt.Errorf("%s[%d] must be 0 or 1 (got %d)", name, i, value)
+		}
+		out[i] = value
+	}
+	return out, nil
+}
+
+func quickKeyValuesToState(values []int) sds200.QuickKeyState {
+	var state sds200.QuickKeyState
+	copy(state[:], values)
+	return state
+}
+
+func quickKeyStateToValues(state sds200.QuickKeyState) []int {
+	return slices.Clone(state[:])
 }
 
 func (s *ScannerSession) publishScannerState(status sds200.RuntimeStatus) {
@@ -334,16 +632,10 @@ func (s *ScannerSession) publishScannerState(status sds200.RuntimeStatus) {
 }
 
 func (s *ScannerSession) signalFatal(err error) {
-	s.logf("hard fault: %v", err)
+	log.Printf("session: hard fault: %v", err)
 	select {
 	case s.fatalErr <- err:
 	default:
 	}
 	s.cancel()
-}
-
-func (s *ScannerSession) logf(format string, args ...any) {
-	if s.cfg.Logger != nil {
-		s.cfg.Logger.Printf("session: "+format, args...)
-	}
 }

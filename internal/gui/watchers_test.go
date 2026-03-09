@@ -14,18 +14,66 @@ import (
 )
 
 func TestApplyState(t *testing.T) {
+	// Fyne widget state is process-global in tests; keep serial to avoid races.
 	t.Run("disconnected_disables_controls", func(t *testing.T) {
 		model := &uiModel{selectedClip: -1}
 		ui := newTestUIViews(model)
 
 		applyState(ui, model, RuntimeState{Scanner: ScannerStatus{Connected: false, UpdatedAt: time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)}})
 
-		assert.Equal(t, "Disconnected", ui.connLabel.Text)
-		assert.True(t, ui.reconnectLabel.Visible())
-		assert.Equal(t, "Connecting...", ui.reconnectLabel.Text)
-		assert.True(t, ui.spinner.Visible())
+		assert.Equal(t, "Connecting...", ui.connectionLabel.Text)
 		assert.True(t, ui.holdButton.Disabled())
-		assert.True(t, ui.resumeButton.Disabled())
+		assert.True(t, ui.nextButton.Disabled())
+		assert.True(t, ui.previousButton.Disabled())
+		assert.True(t, ui.avoidButton.Disabled())
+		assert.Contains(t, ui.controlStatus.Text, "scanner is disconnected")
+		assert.True(t, ui.startRecButton.Disabled())
+		assert.Equal(t, "Start Recording", ui.startRecButton.Text)
+	})
+
+	t.Run("fallback_capabilities_use_runtime_state", func(t *testing.T) {
+		model := &uiModel{selectedClip: -1}
+		ui := newTestUIViews(model)
+
+		applyState(ui, model, RuntimeState{Scanner: ScannerStatus{
+			Connected:     true,
+			CanHoldTarget: true,
+			UpdatedAt:     time.Date(2026, 3, 8, 10, 0, 1, 0, time.UTC),
+		}})
+
+		assert.False(t, ui.holdButton.Disabled())
+		assert.False(t, ui.nextButton.Disabled())
+		assert.False(t, ui.previousButton.Disabled())
+		assert.False(t, ui.avoidButton.Disabled())
+		assert.Equal(t, "All visible controls available.", ui.controlStatus.Text)
+	})
+
+	t.Run("pending_control_action_keeps_buttons_disabled", func(t *testing.T) {
+		model := &uiModel{selectedClip: -1, pendingControlAction: true}
+		ui := newTestUIViews(model)
+
+		applyState(ui, model, RuntimeState{Scanner: ScannerStatus{
+			Connected:     true,
+			CanHoldTarget: true,
+			UpdatedAt:     time.Date(2026, 3, 8, 10, 0, 1, 0, time.UTC),
+			Capabilities: map[ControlIntent]ControlCapability{
+				IntentHoldCurrent:     {Available: true},
+				IntentNext:            {Available: true},
+				IntentPrevious:        {Available: true},
+				IntentAvoid:           {Available: true},
+				IntentJumpNumberTag:   {Available: true},
+				IntentQuickSearchHold: {Available: true},
+				IntentJumpMode:        {Available: true},
+				IntentSetVolume:       {Available: true},
+				IntentSetSquelch:      {Available: true},
+			},
+		}})
+
+		assert.True(t, ui.holdButton.Disabled())
+		assert.True(t, ui.nextButton.Disabled())
+		assert.True(t, ui.previousButton.Disabled())
+		assert.True(t, ui.avoidButton.Disabled())
+		assert.True(t, ui.jumpTagButton.Disabled())
 	})
 
 	t.Run("hold_target_enables_hold", func(t *testing.T) {
@@ -38,6 +86,19 @@ func TestApplyState(t *testing.T) {
 			UpdatedAt:   time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC),
 		}})
 
+		allAvailable := map[ControlIntent]ControlCapability{
+			IntentHoldCurrent:     {Available: true},
+			IntentReleaseHold:     {Available: true},
+			IntentNext:            {Available: true},
+			IntentPrevious:        {Available: true},
+			IntentJumpNumberTag:   {Available: true},
+			IntentQuickSearchHold: {Available: true},
+			IntentJumpMode:        {Available: true},
+			IntentAvoid:           {Available: true},
+			IntentUnavoid:         {Available: true},
+			IntentSetVolume:       {Available: true},
+			IntentSetSquelch:      {Available: true},
+		}
 		applyState(ui, model, RuntimeState{Scanner: ScannerStatus{
 			Connected:     true,
 			Mode:          "scan",
@@ -51,31 +112,84 @@ func TestApplyState(t *testing.T) {
 			Active:        true,
 			Volume:        11,
 			CanHoldTarget: true,
+			Capabilities:  allAvailable,
 			UpdatedAt:     time.Date(2026, 3, 8, 10, 0, 2, 0, time.UTC),
 		}})
+		applyState(ui, model, RuntimeState{Scanner: ScannerStatus{
+			Connected:     true,
+			Mode:          "scan",
+			ViewScreen:    "conventional",
+			Frequency:     "155.2200",
+			System:        "County",
+			Department:    "Fire",
+			Channel:       "Ops",
+			Signal:        4,
+			SquelchOpen:   true,
+			Active:        true,
+			Volume:        11,
+			CanHoldTarget: true,
+			Capabilities:  allAvailable,
+			UpdatedAt:     time.Date(2026, 3, 8, 10, 0, 3, 0, time.UTC),
+		}})
 
-		assert.Equal(t, "Connected", ui.connLabel.Text)
-		assert.False(t, ui.reconnectLabel.Visible())
-		assert.False(t, ui.spinner.Visible())
+		assert.Equal(t, "Connected", ui.connectionLabel.Text)
 		assert.False(t, ui.holdButton.Disabled())
-		assert.True(t, ui.resumeButton.Disabled())
+		assert.Equal(t, "Hold", ui.holdButton.Text)
+		assert.False(t, ui.nextButton.Disabled())
+		assert.False(t, ui.previousButton.Disabled())
+		assert.False(t, ui.avoidButton.Disabled())
+		assert.Equal(t, "All visible controls available.", ui.controlStatus.Text)
+		assert.False(t, ui.startRecButton.Disabled())
+		assert.Equal(t, "Start Recording", ui.startRecButton.Text)
+		assert.Equal(t, "Scanning", ui.lifecycleLabel.Text)
 		assert.Equal(t, "scan", ui.modeLabel.Text)
 		assert.Equal(t, "155.2200", ui.freqLabel.Text)
 		assert.Equal(t, "open", ui.squelchLabel.Text)
 		assert.Equal(t, "0", ui.squelchLvlLabel.Text)
 		assert.Equal(t, "unmuted", ui.muteLabel.Text)
 		require.Len(t, model.activities, 1)
-		assert.Contains(t, model.activities[0], "transmission start")
+		assert.Contains(t, model.activities[0], "active")
 	})
 
 	t.Run("hold_state_enables_resume", func(t *testing.T) {
 		model := &uiModel{selectedClip: -1}
 		ui := newTestUIViews(model)
 
-		applyState(ui, model, RuntimeState{Scanner: ScannerStatus{Connected: true, Hold: true, CanHoldTarget: true, UpdatedAt: time.Date(2026, 3, 8, 10, 0, 2, 0, time.UTC)}})
+		applyState(ui, model, RuntimeState{Scanner: ScannerStatus{
+			Connected:     true,
+			Hold:          true,
+			CanHoldTarget: true,
+			UpdatedAt:     time.Date(2026, 3, 8, 10, 0, 2, 0, time.UTC),
+			Capabilities: map[ControlIntent]ControlCapability{
+				IntentReleaseHold: {Available: true},
+				IntentAvoid:       {Available: true},
+				IntentUnavoid:     {Available: true},
+			},
+		}})
 
-		assert.True(t, ui.holdButton.Disabled())
-		assert.False(t, ui.resumeButton.Disabled())
+		assert.False(t, ui.holdButton.Disabled())
+		assert.Equal(t, "Release Hold", ui.holdButton.Text)
+		assert.False(t, ui.avoidButton.Disabled())
+		assert.Equal(t, "Hold", ui.lifecycleLabel.Text)
+	})
+
+	t.Run("avoid_button_shows_unavoid", func(t *testing.T) {
+		model := &uiModel{selectedClip: -1}
+		ui := newTestUIViews(model)
+
+		applyState(ui, model, RuntimeState{Scanner: ScannerStatus{
+			Connected:     true,
+			CanHoldTarget: true,
+			AvoidKnown:    true,
+			Avoided:       true,
+			UpdatedAt:     time.Date(2026, 3, 8, 10, 0, 2, 0, time.UTC),
+			Capabilities: map[ControlIntent]ControlCapability{
+				IntentUnavoid: {Available: true},
+			},
+		}})
+
+		assert.Equal(t, "Unavoid", ui.avoidButton.Text)
+		assert.False(t, ui.avoidButton.Disabled())
 	})
 
 	t.Run("disconnected_after_connection_shows_reconnecting", func(t *testing.T) {
@@ -85,10 +199,7 @@ func TestApplyState(t *testing.T) {
 		applyState(ui, model, RuntimeState{Scanner: ScannerStatus{Connected: true, UpdatedAt: time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)}})
 		applyState(ui, model, RuntimeState{Scanner: ScannerStatus{Connected: false, UpdatedAt: time.Date(2026, 3, 8, 10, 0, 1, 0, time.UTC)}})
 
-		assert.Equal(t, "Disconnected", ui.connLabel.Text)
-		assert.True(t, ui.reconnectLabel.Visible())
-		assert.Equal(t, "Reconnecting...", ui.reconnectLabel.Text)
-		assert.True(t, ui.spinner.Visible())
+		assert.Equal(t, "Reconnecting...", ui.connectionLabel.Text)
 	})
 
 	t.Run("fatal_hides_reconnect_indicator", func(t *testing.T) {
@@ -97,13 +208,56 @@ func TestApplyState(t *testing.T) {
 
 		applyState(ui, model, RuntimeState{Scanner: ScannerStatus{Connected: false, UpdatedAt: time.Date(2026, 3, 8, 10, 0, 2, 0, time.UTC)}})
 
-		assert.Equal(t, "Disconnected", ui.connLabel.Text)
-		assert.False(t, ui.reconnectLabel.Visible())
-		assert.False(t, ui.spinner.Visible())
+		assert.Equal(t, "Disconnected", ui.connectionLabel.Text)
+	})
+
+	t.Run("manual_recording_shows_stop", func(t *testing.T) {
+		model := &uiModel{selectedClip: -1}
+		ui := newTestUIViews(model)
+		started := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+
+		applyState(ui, model, RuntimeState{
+			Scanner: ScannerStatus{
+				Connected: true,
+				UpdatedAt: started,
+			},
+			Recording: RecordingStatus{
+				Active:    true,
+				StartedAt: started.Add(-75 * time.Second),
+				Manual:    true,
+				Trigger:   "manual",
+			},
+		})
+
+		assert.False(t, ui.startRecButton.Disabled())
+		assert.Contains(t, ui.startRecButton.Text, "Stop (")
+	})
+
+	t.Run("activity_recording_disables_button", func(t *testing.T) {
+		model := &uiModel{selectedClip: -1}
+		ui := newTestUIViews(model)
+		started := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+
+		applyState(ui, model, RuntimeState{
+			Scanner: ScannerStatus{
+				Connected: true,
+				UpdatedAt: started,
+			},
+			Recording: RecordingStatus{
+				Active:    true,
+				StartedAt: started.Add(-20 * time.Second),
+				Manual:    false,
+				Trigger:   "telemetry",
+			},
+		})
+
+		assert.True(t, ui.startRecButton.Disabled())
+		assert.Contains(t, ui.startRecButton.Text, "Recording (")
 	})
 }
 
 func TestApplyRecordingsLoadResult(t *testing.T) {
+	// Fyne widget state is process-global in tests; keep serial to avoid races.
 	t.Run("records_loader_error", func(t *testing.T) {
 		model := &uiModel{selectedClip: -1}
 		ui := newTestUIViews(model)
@@ -153,7 +307,7 @@ func TestApplyRecordingsLoadResult(t *testing.T) {
 		assert.False(t, ui.playButton.Disabled())
 	})
 
-	t.Run("resets_selection_when_recordings_change_even_if_index_in_bounds", func(t *testing.T) {
+	t.Run("restores_selection_by_id", func(t *testing.T) {
 		model := &uiModel{
 			recordings: []Recording{
 				{ID: "new"},
@@ -176,7 +330,7 @@ func TestApplyRecordingsLoadResult(t *testing.T) {
 		assert.False(t, ui.playButton.Disabled())
 	})
 
-	t.Run("force_refresh_keeps_selection_when_data_unchanged", func(t *testing.T) {
+	t.Run("force_refresh_keeps_selection", func(t *testing.T) {
 		recs := []Recording{{ID: "one", FilePath: "/tmp/one.flac"}}
 		model := &uiModel{recordings: recs, selectedClip: 0}
 		ui := newTestUIViews(model)
@@ -190,16 +344,25 @@ func TestApplyRecordingsLoadResult(t *testing.T) {
 }
 
 func newTestUIViews(model *uiModel) uiViews {
-	reconnect := widget.NewLabel("Reconnecting...")
-	reconnect.Hide()
-	spinner := widget.NewProgressBarInfinite()
-	spinner.Hide()
-
 	activityList := widget.NewList(
 		func() int {
 			model.mu.Lock()
 			defer model.mu.Unlock()
 			return len(model.activities)
+		},
+		func() fyne.CanvasObject {
+			return widget.NewLabel("")
+		},
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			_ = id
+			_ = obj
+		},
+	)
+	suppressedList := widget.NewList(
+		func() int {
+			model.mu.Lock()
+			defer model.mu.Unlock()
+			return len(model.suppressed)
 		},
 		func() fyne.CanvasObject {
 			return widget.NewLabel("")
@@ -226,32 +389,46 @@ func newTestUIViews(model *uiModel) uiViews {
 	)
 
 	return uiViews{
-		connLabel:       widget.NewLabel(""),
-		reconnectLabel:  reconnect,
-		fatalReason:     widget.NewLabel(""),
-		modeLabel:       widget.NewLabel(""),
-		sourceLabel:     widget.NewLabel(""),
-		freqLabel:       widget.NewLabel(""),
-		systemLabel:     widget.NewLabel(""),
-		deptLabel:       widget.NewLabel(""),
-		channelLabel:    widget.NewLabel(""),
-		tgidLabel:       widget.NewLabel(""),
-		signalLabel:     widget.NewLabel(""),
-		squelchLabel:    widget.NewLabel(""),
-		squelchLvlLabel: widget.NewLabel(""),
-		muteLabel:       widget.NewLabel(""),
-		volumeLabel:     widget.NewLabel(""),
-		updatedLabel:    widget.NewLabel(""),
-		holdButton:      widget.NewButton("Hold", nil),
-		resumeButton:    widget.NewButton("Resume", nil),
-		startRecButton:  widget.NewButton("Start Recording", nil),
-		stopRecButton:   widget.NewButton("Stop Recording", nil),
-		playButton:      widget.NewButton("Play", nil),
-		deleteButton:    widget.NewButton("Delete Selected", nil),
-		activityList:    activityList,
-		recordingsList:  recordingsList,
-		recordingsErr:   widget.NewLabel(""),
-		recordingsNote:  widget.NewLabel(""),
-		spinner:         spinner,
+		connectionLabel:  widget.NewLabel(""),
+		modeLabel:        widget.NewLabel(""),
+		lifecycleLabel:   widget.NewLabel(""),
+		sourceLabel:      widget.NewLabel(""),
+		freqLabel:        widget.NewLabel(""),
+		systemLabel:      widget.NewLabel(""),
+		deptLabel:        widget.NewLabel(""),
+		channelLabel:     widget.NewLabel(""),
+		tgidLabel:        widget.NewLabel(""),
+		signalLabel:      widget.NewLabel(""),
+		squelchLabel:     widget.NewLabel(""),
+		squelchLvlLabel:  widget.NewLabel(""),
+		muteLabel:        widget.NewLabel(""),
+		volumeLabel:      widget.NewLabel(""),
+		updatedLabel:     widget.NewLabel(""),
+		holdButton:       widget.NewButton("Hold", nil),
+		nextButton:       widget.NewButton("Next", nil),
+		previousButton:   widget.NewButton("Previous", nil),
+		jumpTagButton:    widget.NewButton("Jump Tag", nil),
+		qshButton:        widget.NewButton("QSH", nil),
+		jumpScanButton:   widget.NewButton("Jump Scan", nil),
+		jumpWXButton:     widget.NewButton("Jump WX", nil),
+		avoidButton:      widget.NewButton("Avoid", nil),
+		setVolumeButton:  widget.NewButton("Set Volume", nil),
+		setSquelchButton: widget.NewButton("Set Squelch", nil),
+		commandAction:    widget.NewLabel(""),
+		commandStatus:    widget.NewLabel(""),
+		commandMessage:   widget.NewLabel(""),
+		controlStatus:    widget.NewLabel(""),
+		holdStatusLabel:  widget.NewLabel(""),
+		tagFavEntry:      widget.NewEntry(),
+		tagSysEntry:      widget.NewEntry(),
+		tagChanEntry:     widget.NewEntry(),
+		qshFreqEntry:     widget.NewEntry(),
+		startRecButton:   widget.NewButton("Start Recording", nil),
+		playButton:       widget.NewButton("Play", nil),
+		deleteButton:     widget.NewButton("Delete Selected", nil),
+		activityList:     activityList,
+		suppressedList:   suppressedList,
+		recordingsList:   recordingsList,
+		recordingsErr:    widget.NewLabel(""),
 	}
 }

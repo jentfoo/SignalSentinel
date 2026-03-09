@@ -35,8 +35,10 @@ func TestEvaluateCapabilities(t *testing.T) {
 	t.Parallel()
 
 	registry := map[ControlIntent]CapabilitySpec{
-		IntentHold:       {Command: "HLD", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true, RequiresHoldTarget: true},
+		IntentHold:       {Command: "HLD", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true, RequiresNotHold: true, RequiresHoldTarget: true},
 		IntentResumeScan: {Command: "JPM", Safety: CapabilitySafe, DefaultEnabled: true, RequiresConnected: true, RequiresHold: true},
+		IntentAvoid:      {Command: "AVD", Safety: CapabilityDisruptive, DefaultEnabled: true, RequiresConnected: true, RequiresHoldTarget: true},
+		IntentUnavoid:    {Command: "AVD", Safety: CapabilityDisruptive, DefaultEnabled: true, RequiresConnected: true, RequiresHoldTarget: true},
 		IntentPowerOff:   {Command: "POF", Safety: CapabilityDestructive, DefaultEnabled: false, ExpertOnly: true, RequiresConnected: true},
 	}
 
@@ -64,6 +66,34 @@ func TestEvaluateCapabilities(t *testing.T) {
 		assert.Empty(t, caps[IntentHold].DisabledReason)
 	})
 
+	t.Run("hold_reports_already_hold_mode", func(t *testing.T) {
+		state := RuntimeState{Scanner: sds200.RuntimeStatus{
+			Connected:  true,
+			Hold:       true,
+			HoldTarget: sds200.HoldTarget{Keyword: "TGID", Arg1: "100"},
+		}}
+		caps := EvaluateCapabilities(registry, state, false)
+
+		assert.False(t, caps[IntentHold].Available)
+		assert.Equal(t, "scanner is already in hold mode", caps[IntentHold].DisabledReason)
+	})
+
+	t.Run("avoid_requires_target", func(t *testing.T) {
+		state := RuntimeState{Scanner: sds200.RuntimeStatus{Connected: true}}
+		caps := EvaluateCapabilities(registry, state, false)
+
+		assert.False(t, caps[IntentAvoid].Available)
+		assert.Equal(t, "hold target unavailable", caps[IntentAvoid].DisabledReason)
+	})
+
+	t.Run("unavoid_requires_target", func(t *testing.T) {
+		state := RuntimeState{Scanner: sds200.RuntimeStatus{Connected: true}}
+		caps := EvaluateCapabilities(registry, state, false)
+
+		assert.False(t, caps[IntentUnavoid].Available)
+		assert.Equal(t, "hold target unavailable", caps[IntentUnavoid].DisabledReason)
+	})
+
 	t.Run("expert_and_default_disabled_reason", func(t *testing.T) {
 		state := RuntimeState{Scanner: sds200.RuntimeStatus{Connected: true}}
 		caps := EvaluateCapabilities(registry, state, false)
@@ -76,6 +106,8 @@ func TestEvaluateCapabilities(t *testing.T) {
 func TestValidateCapabilityDefaults(t *testing.T) {
 	t.Parallel()
 
-	err := ValidateCapabilityDefaults(DefaultCapabilityRegistry(), RuntimeState{}, false)
-	require.NoError(t, err)
+	t.Run("defaults_validate", func(t *testing.T) {
+		err := ValidateCapabilityDefaults(DefaultCapabilityRegistry(), RuntimeState{}, false)
+		require.NoError(t, err)
+	})
 }

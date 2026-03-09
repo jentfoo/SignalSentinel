@@ -65,10 +65,13 @@ func run(opts cliFlags) error {
 	defer func() { _ = audioSession.Close() }()
 
 	toGUIRuntimeState := func(status sds200.RuntimeStatus) gui.RuntimeState {
+		caps := EvaluateCapabilities(runtime.capabilities, RuntimeState{Scanner: status}, false)
+		recStatus := recorder.Snapshot()
 		return gui.RuntimeState{
 			Scanner: gui.ScannerStatus{
 				Connected:     status.Connected,
 				Mode:          status.Mode,
+				LifecycleMode: gui.DeriveLifecycleMode(status.Connected, status.Hold, status.Mode),
 				ViewScreen:    status.ViewScreen,
 				Frequency:     status.Frequency,
 				System:        status.System,
@@ -85,6 +88,15 @@ func run(opts cliFlags) error {
 				UpdatedAt:     status.UpdatedAt,
 				LastSource:    status.LastSource,
 				CanHoldTarget: status.HoldTarget.Keyword != "" && status.HoldTarget.Arg1 != "",
+				Avoided:       status.Avoided,
+				AvoidKnown:    status.AvoidKnown,
+				Capabilities:  buildGUICapabilities(caps),
+			},
+			Recording: gui.RecordingStatus{
+				Active:    recStatus.Active,
+				StartedAt: recStatus.StartedAt,
+				Trigger:   recStatus.Trigger,
+				Manual:    recStatus.Manual,
 			},
 		}
 	}
@@ -95,6 +107,11 @@ func run(opts cliFlags) error {
 			ScannerIP:       cfg.Config.Scanner.IP,
 			RecordingsPath:  cfg.Config.Storage.RecordingsPath,
 			HangTimeSeconds: cfg.Config.Recording.HangTimeSeconds,
+			Activity: gui.ActivitySettings{
+				StartDebounceMS: cfg.Config.Activity.StartDebounceMS,
+				EndDebounceMS:   cfg.Config.Activity.EndDebounceMS,
+				MinActivityMS:   cfg.Config.Activity.MinActivityMS,
+			},
 		}
 	}
 
@@ -122,20 +139,69 @@ func run(opts cliFlags) error {
 			}()
 			return out
 		},
-		EnqueueControl: func(intent gui.ControlIntent) {
-			switch intent {
-			case gui.IntentHoldCurrent:
-				runtime.EnqueueControl(IntentHold)
-			case gui.IntentResumeScan:
-				runtime.EnqueueControl(IntentResumeScan)
+		ExecuteControl: func(request gui.ControlRequest) gui.ControlResult {
+			return executeGUIControl(runtime, request)
+		},
+		LoadScanScope: func(favoritesTag, systemTag int) (gui.ScanScopeSnapshot, error) {
+			return runtime.ReadScanScope(favoritesTag, systemTag)
+		},
+		LoadScanProfiles: func() ([]gui.ScanProfile, error) {
+			profiles, err := runtime.ScanProfiles()
+			if err != nil {
+				return nil, err
 			}
+			out := make([]gui.ScanProfile, 0, len(profiles))
+			for _, profile := range profiles {
+				out = append(out, gui.ScanProfile{
+					Name:                profile.Name,
+					FavoritesQuickKeys:  append([]int(nil), profile.FavoritesQuickKeys...),
+					ServiceTypes:        append([]int(nil), profile.ServiceTypes...),
+					UpdatedAt:           profile.UpdatedAt,
+					SystemQuickKeys:     deepCopyIntSliceMap(profile.SystemQuickKeys),
+					DepartmentQuickKeys: deepCopyIntSliceMap(profile.DepartmentQuickKeys),
+				})
+			}
+			sort.SliceStable(out, func(i, j int) bool {
+				return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+			})
+			return out, nil
+		},
+		SaveScanProfile: func(profile gui.ScanProfile) error {
+			return runtime.SaveScanProfile(store.ScanProfile{
+				Name:                strings.TrimSpace(profile.Name),
+				FavoritesQuickKeys:  append([]int(nil), profile.FavoritesQuickKeys...),
+				ServiceTypes:        append([]int(nil), profile.ServiceTypes...),
+				SystemQuickKeys:     deepCopyIntSliceMap(profile.SystemQuickKeys),
+				DepartmentQuickKeys: deepCopyIntSliceMap(profile.DepartmentQuickKeys),
+			})
+		},
+		DeleteScanProfile: func(name string) error {
+			return runtime.DeleteScanProfile(name)
+		},
+		ApplyScanProfile: func(name string, favoritesTag int, systemTag int) error {
+			return runtime.ApplyScanProfile(name, ProfileScopeSelector{
+				FavoritesTag: favoritesTag,
+				SystemTag:    systemTag,
+			})
 		},
 		StartRecording: func() error {
 			status := runtime.StateSnapshot().Scanner
-			return recorder.StartManual(status, time.Now())
+			if err := recorder.StartManual(status, time.Now()); err != nil {
+				return err
+			}
+			if runtime.state != nil {
+				runtime.state.publish(runtime.StateSnapshot())
+			}
+			return nil
 		},
 		StopRecording: func() error {
-			return recorder.StopManual(time.Now())
+			if err := recorder.StopManual(time.Now()); err != nil {
+				return err
+			}
+			if runtime.state != nil {
+				runtime.state.publish(runtime.StateSnapshot())
+			}
+			return nil
 		},
 		LoadRecordings: func() ([]gui.Recording, error) {
 			entries, err := runtime.Recordings()
@@ -225,6 +291,163 @@ func run(opts cliFlags) error {
 		return guiErr
 	}
 	return nil
+}
+
+func executeGUIControl(runtime *Runtime, request gui.ControlRequest) gui.ControlResult {
+	result := gui.ControlResult{
+		Intent:  request.Intent,
+		Success: false,
+		At:      time.Now().UTC(),
+	}
+	intent, params, action, err := mapGUIControlRequest(request)
+	if err != nil {
+		result.Action = "Invalid Request"
+		result.Command = "-"
+		result.Message = "request rejected"
+		result.RawReason = err.Error()
+		result.RetryHint = "Fix request values and retry."
+		return result
+	}
+	spec, ok := runtime.capabilities[intent]
+	if ok {
+		result.Command = spec.Command
+	} else {
+		result.Command = "-"
+	}
+	result.Action = action
+
+	capabilities := EvaluateCapabilities(runtime.capabilities, runtime.StateSnapshot(), false)
+	if cap, ok := capabilities[intent]; ok && !cap.Available {
+		result.Message = "operation unavailable"
+		result.RawReason = cap.DisabledReason
+		result.RetryHint = "Adjust scanner mode/state and retry."
+		return result
+	}
+
+	if err := runtime.ExecuteControl(intent, params); err != nil {
+		message, hint, unsupported := classifyControlError(err)
+		result.Message = message
+		result.RawReason = err.Error()
+		result.RetryHint = hint
+		result.Unsupported = unsupported
+		return result
+	}
+	result.Success = true
+	result.Message = "command executed"
+	result.RawReason = "-"
+	result.RetryHint = "-"
+	return result
+}
+
+func classifyControlError(err error) (message string, retryHint string, unsupported bool) {
+	if err == nil {
+		return "command failed", "Retry.", false
+	}
+	reason := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(reason, "unsupported"):
+		return "operation not supported", "Use an alternative control or verify scanner firmware/mode.", true
+	case strings.Contains(reason, "must be in range"), strings.Contains(reason, "must contain"), strings.Contains(reason, "must be 0 or 1"):
+		return "invalid input", "Adjust control values and retry.", false
+	case strings.Contains(reason, "unavailable"), strings.Contains(reason, "hold target"):
+		return "operation unavailable in current state", "Wait for a valid hold target or change scan mode, then retry.", false
+	case strings.Contains(reason, "resync failed"):
+		return "scope changed but refresh failed", "Retry once. If it persists, reconnect scanner session.", false
+	default:
+		return "command failed", "Retry. If this repeats, check scanner connection and logs.", false
+	}
+}
+
+func mapGUIControlRequest(request gui.ControlRequest) (ControlIntent, ControlParams, string, error) {
+	switch request.Intent {
+	case gui.IntentHoldCurrent:
+		return IntentHold, ControlParams{}, "Hold", nil
+	case gui.IntentReleaseHold:
+		return IntentResumeScan, ControlParams{}, "Release Hold", nil
+	case gui.IntentNext:
+		return IntentNext, ControlParams{}, "Next", nil
+	case gui.IntentPrevious:
+		return IntentPrevious, ControlParams{}, "Previous", nil
+	case gui.IntentJumpNumberTag:
+		return IntentJumpNumberTag, ControlParams{
+			FavoritesTag: request.NumberTag.Favorites,
+			SystemTag:    request.NumberTag.System,
+			ChannelTag:   request.NumberTag.Channel,
+		}, "Jump Number Tag", nil
+	case gui.IntentQuickSearchHold:
+		return IntentQuickSearchHold, ControlParams{
+			FrequencyHz: request.FrequencyHz,
+		}, "Quick Search Hold", nil
+	case gui.IntentJumpMode:
+		return IntentJumpMode, ControlParams{
+			JumpMode:  request.JumpMode,
+			JumpIndex: request.JumpIndex,
+		}, "Jump Mode", nil
+	case gui.IntentAvoid:
+		return IntentAvoid, ControlParams{}, "Avoid", nil
+	case gui.IntentUnavoid:
+		return IntentUnavoid, ControlParams{}, "Unavoid", nil
+	case gui.IntentSetVolume:
+		return IntentSetVolume, ControlParams{Volume: request.Volume}, "Set Volume", nil
+	case gui.IntentSetSquelch:
+		return IntentSetSquelch, ControlParams{Squelch: request.Squelch}, "Set Squelch", nil
+	case gui.IntentSetFQK:
+		return IntentSetFavoritesQuickKeys, ControlParams{
+			QuickKeyValues: append([]int(nil), request.QuickKeyValues...),
+		}, "Set Favorites Quick Keys", nil
+	case gui.IntentSetSQK:
+		return IntentSetSystemQuickKeys, ControlParams{
+			ScopeFavoritesTag: request.ScopeFavoritesTag,
+			QuickKeyValues:    append([]int(nil), request.QuickKeyValues...),
+		}, "Set System Quick Keys", nil
+	case gui.IntentSetDQK:
+		return IntentSetDepartmentQuickKeys, ControlParams{
+			ScopeFavoritesTag: request.ScopeFavoritesTag,
+			ScopeSystemTag:    request.ScopeSystemTag,
+			QuickKeyValues:    append([]int(nil), request.QuickKeyValues...),
+		}, "Set Department Quick Keys", nil
+	case gui.IntentSetServiceTypes:
+		return IntentSetServiceTypes, ControlParams{
+			ServiceTypes: append([]int(nil), request.ServiceTypes...),
+		}, "Set Service Types", nil
+	default:
+		return "", ControlParams{}, "", fmt.Errorf("unsupported control intent: %s", request.Intent)
+	}
+}
+
+func buildGUICapabilities(items map[ControlIntent]CapabilityAvailability) map[gui.ControlIntent]gui.ControlCapability {
+	if len(items) == 0 {
+		return nil
+	}
+	needed := []ControlIntent{
+		IntentHold,
+		IntentResumeScan,
+		IntentNext,
+		IntentPrevious,
+		IntentJumpNumberTag,
+		IntentQuickSearchHold,
+		IntentJumpMode,
+		IntentAvoid,
+		IntentUnavoid,
+		IntentSetVolume,
+		IntentSetSquelch,
+		IntentSetFavoritesQuickKeys,
+		IntentSetSystemQuickKeys,
+		IntentSetDepartmentQuickKeys,
+		IntentSetServiceTypes,
+	}
+	out := make(map[gui.ControlIntent]gui.ControlCapability, len(needed))
+	for _, intent := range needed {
+		item, ok := items[intent]
+		if !ok {
+			continue
+		}
+		out[gui.ControlIntent(intent)] = gui.ControlCapability{
+			Available:      item.Available,
+			DisabledReason: item.DisabledReason,
+		}
+	}
+	return out
 }
 
 func superviseSubsystems(ctx context.Context, runtime *Runtime, audioErrs <-chan error) <-chan error {
@@ -318,12 +541,17 @@ func startAudioPipeline(ctx context.Context, runtime *Runtime) (*ingest.Session,
 				if !ok {
 					return
 				}
+				prev := rec.Snapshot()
 				if err := rec.UpdateTelemetry(state.Scanner, state.Scanner.UpdatedAt); err != nil {
 					select {
 					case audioErrs <- fmt.Errorf("recording telemetry update: %w", err):
 					default:
 					}
 					return
+				}
+				next := rec.Snapshot()
+				if runtime.state != nil && recordingStatusChanged(prev, next) {
+					runtime.state.publish(runtime.StateSnapshot())
 				}
 			}
 		}
@@ -337,12 +565,17 @@ func startAudioPipeline(ctx context.Context, runtime *Runtime) (*ingest.Session,
 			case <-ctx.Done():
 				return
 			case t := <-ticker.C:
+				prev := rec.Snapshot()
 				if err := rec.Tick(t); err != nil {
 					select {
 					case audioErrs <- fmt.Errorf("recording tick: %w", err):
 					default:
 					}
 					return
+				}
+				next := rec.Snapshot()
+				if runtime.state != nil && recordingStatusChanged(prev, next) {
+					runtime.state.publish(runtime.StateSnapshot())
 				}
 			}
 		}
@@ -382,4 +615,17 @@ func startAudioPipeline(ctx context.Context, runtime *Runtime) (*ingest.Session,
 	}()
 
 	return audioSession, rec, audioErrs, nil
+}
+
+func recordingStatusChanged(a, b recording.Status) bool {
+	if a.Active != b.Active {
+		return true
+	}
+	if a.Manual != b.Manual {
+		return true
+	}
+	if a.Trigger != b.Trigger {
+		return true
+	}
+	return !a.StartedAt.Equal(b.StartedAt)
 }

@@ -96,42 +96,44 @@ func TestRuntimeRecordings(t *testing.T) {
 	})
 }
 
-func TestRuntimeAppendRecordingPreservedAcrossConfigUpdate(t *testing.T) {
+func TestRuntimeAppendRecording(t *testing.T) {
 	t.Parallel()
 
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	s := store.New(configPath)
-	runtime := &Runtime{store: s}
-	doc := validDocument()
-	doc.Config.Storage.RecordingsPath = testRecordingsPath
-	require.NoError(t, runtime.SaveConfig(doc))
+	t.Run("preserved_after_update", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		s := store.New(configPath)
+		runtime := &Runtime{store: s}
+		doc := validDocument()
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
+		require.NoError(t, runtime.SaveConfig(doc))
 
-	entry := store.RecordingEntry{
-		ID:        "rec-42",
-		StartedAt: "2026-03-08T10:00:00Z",
-		EndedAt:   "2026-03-08T10:00:05Z",
-		Duration:  "5s",
-		FilePath:  "/tmp/rec-42.flac",
-		FileSize:  42,
-		Trigger:   "telemetry",
-	}
-	require.NoError(t, runtime.AppendRecording(entry))
+		entry := store.RecordingEntry{
+			ID:        "rec-42",
+			StartedAt: "2026-03-08T10:00:00Z",
+			EndedAt:   "2026-03-08T10:00:05Z",
+			Duration:  "5s",
+			FilePath:  "/tmp/rec-42.flac",
+			FileSize:  42,
+			Trigger:   "telemetry",
+		}
+		require.NoError(t, runtime.AppendRecording(entry))
 
-	require.NoError(t, runtime.UpdateConfig(func(doc *store.Document) error {
-		doc.Config.Scanner.IP = "127.0.0.2"
-		return nil
-	}))
+		require.NoError(t, runtime.UpdateConfig(func(doc *store.Document) error {
+			doc.Config.Scanner.IP = "127.0.0.2"
+			return nil
+		}))
 
-	recordings, err := runtime.Recordings()
-	require.NoError(t, err)
-	require.Len(t, recordings, 1)
-	assert.Equal(t, "rec-42", recordings[0].ID)
+		recordings, err := runtime.Recordings()
+		require.NoError(t, err)
+		require.Len(t, recordings, 1)
+		assert.Equal(t, "rec-42", recordings[0].ID)
 
-	loaded, err := s.Load()
-	require.NoError(t, err)
-	require.Len(t, loaded.State.Recordings, 1)
-	assert.Equal(t, "rec-42", loaded.State.Recordings[0].ID)
-	assert.Equal(t, "127.0.0.2", loaded.Config.Scanner.IP)
+		loaded, err := s.Load()
+		require.NoError(t, err)
+		require.Len(t, loaded.State.Recordings, 1)
+		assert.Equal(t, "rec-42", loaded.State.Recordings[0].ID)
+		assert.Equal(t, "127.0.0.2", loaded.Config.Scanner.IP)
+	})
 }
 
 func TestRuntimeDeleteRecordingsByID(t *testing.T) {
@@ -166,7 +168,7 @@ func TestRuntimeDeleteRecordingsByID(t *testing.T) {
 		assert.Empty(t, recordings)
 	})
 
-	t.Run("reports_partial_failures_and_keeps_failed_metadata", func(t *testing.T) {
+	t.Run("partial_failure_keeps_metadata", func(t *testing.T) {
 		configPath := filepath.Join(t.TempDir(), "config.yaml")
 		s := store.New(configPath)
 		runtime := &Runtime{store: s}
@@ -201,20 +203,6 @@ func TestRuntimeDeleteRecordingsByID(t *testing.T) {
 func TestRuntimeEnqueueControl(t *testing.T) {
 	t.Parallel()
 
-	t.Run("handles_nil_receiver", func(t *testing.T) {
-		var runtime *Runtime
-		assert.NotPanics(t, func() {
-			runtime.EnqueueControl(IntentHold)
-		})
-	})
-
-	t.Run("handles_nil_session", func(t *testing.T) {
-		runtime := &Runtime{}
-		assert.NotPanics(t, func() {
-			runtime.EnqueueControl(IntentResumeScan)
-		})
-	})
-
 	t.Run("forwards_control_intent", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -222,12 +210,325 @@ func TestRuntimeEnqueueControl(t *testing.T) {
 		runtime := &Runtime{
 			session: &ScannerSession{
 				ctx:       ctx,
-				controlCh: make(chan ControlIntent, 1),
+				controlCh: make(chan controlRequest, 1),
 			},
 		}
 
 		runtime.EnqueueControl(IntentResumeScan)
 		assert.Equal(t, IntentResumeScan, requireControlIntent(t, runtime.session.controlCh))
+	})
+}
+
+func TestRuntimeExecuteControl(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rejects_nil_runtime", func(t *testing.T) {
+		var runtime *Runtime
+		err := runtime.ExecuteControl(IntentHold, ControlParams{})
+		require.Error(t, err)
+		assert.Equal(t, "runtime session unavailable", err.Error())
+	})
+
+	t.Run("rejects_nil_session", func(t *testing.T) {
+		runtime := &Runtime{}
+		err := runtime.ExecuteControl(IntentHold, ControlParams{})
+		require.Error(t, err)
+		assert.Equal(t, "runtime session unavailable", err.Error())
+	})
+}
+
+func TestRuntimeSaveScanProfile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("save_updates_profile", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		s := store.New(configPath)
+		runtime := &Runtime{store: s}
+		doc := validDocument()
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
+		require.NoError(t, runtime.SaveConfig(doc))
+
+		profile := store.ScanProfile{
+			Name:               "Ops",
+			FavoritesQuickKeys: enabledValues(100, 3),
+			ServiceTypes:       enabledValues(47, 2),
+			SystemQuickKeys: map[string][]int{
+				"4": enabledValues(100, 4),
+			},
+			DepartmentQuickKeys: map[string][]int{
+				"4:9": enabledValues(100, 5),
+			},
+		}
+		require.NoError(t, runtime.SaveScanProfile(profile))
+
+		profiles, err := runtime.ScanProfiles()
+		require.NoError(t, err)
+		require.Len(t, profiles, 1)
+		assert.Equal(t, "Ops", profiles[0].Name)
+		assert.NotEmpty(t, profiles[0].UpdatedAt)
+		assert.Equal(t, 1, profiles[0].FavoritesQuickKeys[0])
+
+		profile.FavoritesQuickKeys = enabledValues(100, 7)
+		require.NoError(t, runtime.SaveScanProfile(profile))
+		profiles, err = runtime.ScanProfiles()
+		require.NoError(t, err)
+		require.Len(t, profiles, 1)
+		assert.Equal(t, 1, profiles[0].FavoritesQuickKeys[7])
+		assert.Equal(t, 0, profiles[0].FavoritesQuickKeys[3])
+	})
+
+	t.Run("save_profile_merges_maps", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		s := store.New(configPath)
+		runtime := &Runtime{store: s}
+		doc := validDocument()
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
+		require.NoError(t, runtime.SaveConfig(doc))
+
+		require.NoError(t, runtime.SaveScanProfile(store.ScanProfile{
+			Name:               "Ops",
+			FavoritesQuickKeys: enabledValues(100, 2),
+			ServiceTypes:       enabledValues(47, 2),
+			SystemQuickKeys: map[string][]int{
+				"4": enabledValues(100, 4),
+			},
+			DepartmentQuickKeys: map[string][]int{
+				"4:9": enabledValues(100, 9),
+			},
+		}))
+
+		require.NoError(t, runtime.SaveScanProfile(store.ScanProfile{
+			Name:               "Ops",
+			FavoritesQuickKeys: enabledValues(100, 3),
+			ServiceTypes:       enabledValues(47, 3),
+			SystemQuickKeys: map[string][]int{
+				"5": enabledValues(100, 5),
+			},
+			DepartmentQuickKeys: map[string][]int{
+				"5:8": enabledValues(100, 8),
+			},
+		}))
+
+		profiles, err := runtime.ScanProfiles()
+		require.NoError(t, err)
+		require.Len(t, profiles, 1)
+		require.Contains(t, profiles[0].SystemQuickKeys, "4")
+		require.Contains(t, profiles[0].SystemQuickKeys, "5")
+		require.Contains(t, profiles[0].DepartmentQuickKeys, "4:9")
+		require.Contains(t, profiles[0].DepartmentQuickKeys, "5:8")
+	})
+
+	t.Run("canonicalizes_scope_keys", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		s := store.New(configPath)
+		runtime := &Runtime{store: s}
+		doc := validDocument()
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
+		require.NoError(t, runtime.SaveConfig(doc))
+
+		require.NoError(t, runtime.SaveScanProfile(store.ScanProfile{
+			Name:               "Canon",
+			FavoritesQuickKeys: enabledValues(100, 2),
+			ServiceTypes:       enabledValues(47, 2),
+			SystemQuickKeys: map[string][]int{
+				"04": enabledValues(100, 4),
+			},
+			DepartmentQuickKeys: map[string][]int{
+				"04:09": enabledValues(100, 9),
+			},
+		}))
+
+		profiles, err := runtime.ScanProfiles()
+		require.NoError(t, err)
+		require.Len(t, profiles, 1)
+		require.Contains(t, profiles[0].SystemQuickKeys, "4")
+		require.Contains(t, profiles[0].DepartmentQuickKeys, "4:9")
+		assert.NotContains(t, profiles[0].SystemQuickKeys, "04")
+		assert.NotContains(t, profiles[0].DepartmentQuickKeys, "04:09")
+	})
+
+	t.Run("rewrites_legacy_keys", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		s := store.New(configPath)
+		runtime := &Runtime{store: s}
+		doc := validDocument()
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
+		doc.State.ScanProfiles = []store.ScanProfile{
+			{
+				Name:               "LegacyMerge",
+				FavoritesQuickKeys: enabledValues(100, 2),
+				ServiceTypes:       enabledValues(47, 2),
+				SystemQuickKeys: map[string][]int{
+					"04": enabledValues(100, 4),
+				},
+				DepartmentQuickKeys: map[string][]int{
+					"04:09": enabledValues(100, 9),
+				},
+			},
+		}
+		require.NoError(t, runtime.SaveConfig(doc))
+
+		require.NoError(t, runtime.SaveScanProfile(store.ScanProfile{
+			Name:               "LegacyMerge",
+			FavoritesQuickKeys: enabledValues(100, 3),
+			ServiceTypes:       enabledValues(47, 3),
+			SystemQuickKeys: map[string][]int{
+				"4": enabledValues(100, 5),
+			},
+			DepartmentQuickKeys: map[string][]int{
+				"4:9": enabledValues(100, 6),
+			},
+		}))
+
+		profiles, err := runtime.ScanProfiles()
+		require.NoError(t, err)
+		require.Len(t, profiles, 1)
+		require.Contains(t, profiles[0].SystemQuickKeys, "4")
+		require.Contains(t, profiles[0].DepartmentQuickKeys, "4:9")
+		assert.NotContains(t, profiles[0].SystemQuickKeys, "04")
+		assert.NotContains(t, profiles[0].DepartmentQuickKeys, "04:09")
+	})
+}
+
+func TestRuntimeScanProfiles(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns_saved_profiles", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		s := store.New(configPath)
+		runtime := &Runtime{store: s}
+		doc := validDocument()
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
+		require.NoError(t, runtime.SaveConfig(doc))
+		require.NoError(t, runtime.SaveScanProfile(store.ScanProfile{
+			Name:               "Ops",
+			FavoritesQuickKeys: enabledValues(100, 2),
+			ServiceTypes:       enabledValues(47, 2),
+		}))
+
+		profiles, err := runtime.ScanProfiles()
+		require.NoError(t, err)
+		require.Len(t, profiles, 1)
+		assert.Equal(t, "Ops", profiles[0].Name)
+	})
+}
+
+func TestRuntimeDeleteScanProfile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("deletes_profile", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		s := store.New(configPath)
+		runtime := &Runtime{store: s}
+		doc := validDocument()
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
+		require.NoError(t, runtime.SaveConfig(doc))
+		require.NoError(t, runtime.SaveScanProfile(store.ScanProfile{
+			Name:               "Ops",
+			FavoritesQuickKeys: enabledValues(100, 2),
+			ServiceTypes:       enabledValues(47, 2),
+		}))
+		require.NoError(t, runtime.DeleteScanProfile("ops"))
+
+		profiles, err := runtime.ScanProfiles()
+		require.NoError(t, err)
+		assert.Empty(t, profiles)
+	})
+}
+
+func TestRuntimeApplyScanProfile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("apply_profile_executes_controls", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		s := store.New(configPath)
+		runtime := &Runtime{store: s}
+		doc := validDocument()
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
+		require.NoError(t, runtime.SaveConfig(doc))
+
+		require.NoError(t, runtime.SaveScanProfile(store.ScanProfile{
+			Name:               "Night",
+			FavoritesQuickKeys: enabledValues(100, 2),
+			ServiceTypes:       enabledValues(47, 3),
+			SystemQuickKeys: map[string][]int{
+				"4": enabledValues(100, 4),
+			},
+			DepartmentQuickKeys: map[string][]int{
+				"4:9": enabledValues(100, 5),
+			},
+		}))
+
+		ctx, cancel := context.WithCancel(t.Context())
+		client := &fakeSDS200Client{}
+		session := &ScannerSession{
+			ctx:       ctx,
+			cancel:    cancel,
+			client:    client,
+			controlCh: make(chan controlRequest, 1),
+		}
+		session.wg.Add(1)
+		go session.controlLoop()
+		defer func() {
+			cancel()
+			requireWaitGroupDone(t, &session.wg)
+		}()
+
+		runtime.session = session
+
+		err := runtime.ApplyScanProfile("night", ProfileScopeSelector{FavoritesTag: 4, SystemTag: 9})
+		require.NoError(t, err)
+
+		snap := client.snapshot()
+		require.Len(t, snap.setFQKCalls, 1)
+		require.Len(t, snap.setSQKCalls, 1)
+		require.Len(t, snap.setDQKCalls, 1)
+		require.Len(t, snap.setSVCCalls, 1)
+	})
+
+	t.Run("apply_profile_accepts_legacy", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		s := store.New(configPath)
+		runtime := &Runtime{store: s}
+		doc := validDocument()
+		doc.Config.Storage.RecordingsPath = testRecordingsPath
+		doc.State.ScanProfiles = []store.ScanProfile{
+			{
+				Name:               "Legacy",
+				FavoritesQuickKeys: enabledValues(100, 2),
+				ServiceTypes:       enabledValues(47, 3),
+				SystemQuickKeys: map[string][]int{
+					"04": enabledValues(100, 4),
+				},
+				DepartmentQuickKeys: map[string][]int{
+					"04:09": enabledValues(100, 9),
+				},
+			},
+		}
+		require.NoError(t, runtime.SaveConfig(doc))
+
+		ctx, cancel := context.WithCancel(t.Context())
+		client := &fakeSDS200Client{}
+		session := &ScannerSession{
+			ctx:       ctx,
+			cancel:    cancel,
+			client:    client,
+			controlCh: make(chan controlRequest, 1),
+		}
+		session.wg.Add(1)
+		go session.controlLoop()
+		defer func() {
+			cancel()
+			requireWaitGroupDone(t, &session.wg)
+		}()
+		runtime.session = session
+
+		err := runtime.ApplyScanProfile("legacy", ProfileScopeSelector{FavoritesTag: 4, SystemTag: 9})
+		require.NoError(t, err)
+
+		snap := client.snapshot()
+		require.Len(t, snap.setSQKCalls, 1)
+		require.Len(t, snap.setDQKCalls, 1)
 	})
 }
 
@@ -293,7 +594,7 @@ func validDocument() *store.Document {
 	return doc
 }
 
-func requireControlIntent(t *testing.T, ch <-chan ControlIntent) ControlIntent {
+func requireControlIntent(t *testing.T, ch <-chan controlRequest) ControlIntent {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
@@ -301,9 +602,9 @@ func requireControlIntent(t *testing.T, ch <-chan ControlIntent) ControlIntent {
 
 	select {
 	case <-ctx.Done():
-		t.Fatalf("timed out waiting for control intent")
+		require.FailNow(t, "timed out waiting for control intent")
 		return ""
-	case intent := <-ch:
-		return intent
+	case req := <-ch:
+		return req.intent
 	}
 }

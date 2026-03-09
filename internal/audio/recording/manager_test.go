@@ -170,6 +170,52 @@ func TestManagerUpdateTelemetry(t *testing.T) {
 		assert.Equal(t, "telemetry", snap.Trigger)
 	})
 
+	t.Run("frequency_change_restarts_immediately_even_with_start_debounce", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		var clips []Metadata
+		m := NewManager(Config{
+			OutputDir:     filepath.Join(t.TempDir(), "clips"),
+			HangTime:      10 * time.Second,
+			StartDebounce: 10 * time.Second,
+			OnFinalized: func(meta Metadata) error {
+				clips = append(clips, meta)
+				return nil
+			},
+		})
+
+		first := sds200.RuntimeStatus{
+			Connected:   true,
+			SquelchOpen: true,
+			Frequency:   "155.2200",
+			System:      "County",
+			Channel:     "Ops 1",
+		}
+		second := sds200.RuntimeStatus{
+			Connected:   true,
+			SquelchOpen: true,
+			Frequency:   "460.0000",
+			System:      "Metro",
+			Channel:     "Dispatch 9",
+		}
+
+		// Prime auto-start with debounce using two active updates.
+		require.NoError(t, m.UpdateTelemetry(first, t0))
+		require.NoError(t, m.UpdateTelemetry(first, t0.Add(10*time.Second)))
+		require.NoError(t, m.PushPCM([]int16{1, 2, 3}, t0.Add(11*time.Second)))
+
+		// Frequency split should finalize old clip and immediately begin new clip.
+		require.NoError(t, m.UpdateTelemetry(second, t0.Add(12*time.Second)))
+
+		require.Len(t, clips, 1)
+		assert.Equal(t, "155.2200", clips[0].Frequency)
+
+		snap := m.Snapshot()
+		assert.True(t, snap.Active)
+		assert.False(t, snap.Manual)
+		assert.Equal(t, t0.Add(12*time.Second), snap.StartedAt)
+		assert.Equal(t, "telemetry", snap.Trigger)
+	})
+
 	t.Run("avoid_stops_auto_recording_immediately", func(t *testing.T) {
 		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
 		var clips []Metadata

@@ -665,7 +665,7 @@ func startAudioPipeline(ctx context.Context, runtime *Runtime) (*ingest.Session,
 		Address:           doc.Config.Scanner.IP,
 		RTSPPort:          doc.Config.Scanner.RTSPPort,
 		ReconnectDelay:    2 * time.Second,
-		MaxReconnectFails: 5,
+		MaxReconnectFails: 0, // retry indefinitely; avoid hard-failing app on transient scanner/network loss
 		OnFrame: func(frame ingest.Frame) {
 			if err := rec.PushPCM(frame.Samples, frame.ReceivedAt); err != nil {
 				select {

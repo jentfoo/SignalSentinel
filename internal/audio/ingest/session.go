@@ -16,6 +16,7 @@ import (
 const (
 	frameBufferSize        = 256
 	healthySessionDuration = 30 * time.Second
+	maxReconnectDelay      = 30 * time.Second
 )
 
 // Frame is one decoded PCM frame from the RTP stream.
@@ -27,11 +28,13 @@ type Frame struct {
 
 // Config defines RTSP/RTP ingest behavior.
 type Config struct {
-	Address           string
-	RTSPPort          int
-	RTSPPath          string
-	RTPReadTimeout    time.Duration
-	ReconnectDelay    time.Duration
+	Address        string
+	RTSPPort       int
+	RTSPPath       string
+	RTPReadTimeout time.Duration
+	ReconnectDelay time.Duration
+	// MaxReconnectFails controls consecutive reconnect failures allowed before fatal.
+	// Values <= 0 disable the failure budget and retry indefinitely.
 	MaxReconnectFails int
 	Logger            *log.Logger
 	OnFrame           func(Frame)
@@ -60,9 +63,6 @@ func NewSession(parent context.Context, cfg Config) (*Session, error) {
 	}
 	if cfg.ReconnectDelay == 0 {
 		cfg.ReconnectDelay = 2 * time.Second
-	}
-	if cfg.MaxReconnectFails <= 0 {
-		cfg.MaxReconnectFails = 5
 	}
 	ctx, cancel := context.WithCancel(parent)
 	s := &Session{cfg: cfg, ctx: ctx, cancel: cancel, fatal: make(chan error, 1), frames: make(chan Frame, frameBufferSize)}
@@ -106,10 +106,15 @@ func (s *Session) loop() {
 			fails = 0
 		}
 		fails++
-		s.logf("audio ingest reconnect attempt %d/%d after error: %v", fails, s.cfg.MaxReconnectFails, err)
-		if fails >= s.cfg.MaxReconnectFails {
+		delay := reconnectBackoffDelay(s.cfg.ReconnectDelay, fails)
+		if s.cfg.MaxReconnectFails > 0 {
+			s.logf("audio ingest reconnect attempt %d/%d in %s after error: %v", fails, s.cfg.MaxReconnectFails, delay, err)
+		} else {
+			s.logf("audio ingest reconnect attempt %d/unbounded in %s after error: %v", fails, delay, err)
+		}
+		if s.cfg.MaxReconnectFails > 0 && fails >= s.cfg.MaxReconnectFails {
 			select {
-			case s.fatal <- fmt.Errorf("audio ingest reconnect budget exceeded: %w", err):
+			case s.fatal <- fmt.Errorf("audio ingest reconnect budget exceeded after %d consecutive failures: %w", fails, err):
 			default:
 			}
 			return
@@ -117,9 +122,26 @@ func (s *Session) loop() {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-time.After(s.cfg.ReconnectDelay):
+		case <-time.After(delay):
 		}
 	}
+}
+
+func reconnectBackoffDelay(base time.Duration, fails int) time.Duration {
+	if base <= 0 {
+		base = 2 * time.Second
+	}
+	delay := base
+	for attempt := 1; attempt < fails && delay < maxReconnectDelay; attempt++ {
+		if delay > maxReconnectDelay/2 {
+			return maxReconnectDelay
+		}
+		delay *= 2
+	}
+	if delay > maxReconnectDelay {
+		return maxReconnectDelay
+	}
+	return delay
 }
 
 func (s *Session) runOnce() error {

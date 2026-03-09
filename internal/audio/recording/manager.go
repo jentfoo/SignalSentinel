@@ -134,9 +134,14 @@ func (m *Manager) UpdateTelemetry(status sds200.RuntimeStatus, at time.Time) err
 			}
 			m.resetDetectorLocked()
 			if active {
-				if err := m.handleAutoStart(status, active, at); err != nil {
+				// Frequency splits happen mid-activity; start the follow-on clip immediately
+				// instead of waiting for debounce + another telemetry update.
+				m.clearAutoStartPendingLocked()
+				if err := m.begin(at, status, recordTriggerTelemetry); err != nil {
 					return err
 				}
+				m.resetDetectorLocked()
+				m.detector.Evaluate(true, at)
 			}
 			return nil
 		}

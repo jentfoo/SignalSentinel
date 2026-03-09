@@ -14,6 +14,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func unavailableRTSPPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := ln.Addr().(*net.TCPAddr).Port
+	require.NoError(t, ln.Close())
+	return port
+}
+
 func startIngestRTSPMockServer(t *testing.T) (host string, port int, serverRTPPort int) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -281,4 +290,63 @@ func TestIngestSessionReceivesFrame(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		require.FailNow(t, "expected decoded frame")
 	}
+}
+
+func TestReconnectBackoffDelay(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 2*time.Second, reconnectBackoffDelay(2*time.Second, 1))
+	assert.Equal(t, 4*time.Second, reconnectBackoffDelay(2*time.Second, 2))
+	assert.Equal(t, 8*time.Second, reconnectBackoffDelay(2*time.Second, 3))
+	assert.Equal(t, 16*time.Second, reconnectBackoffDelay(2*time.Second, 4))
+	assert.Equal(t, 30*time.Second, reconnectBackoffDelay(2*time.Second, 5))
+	assert.Equal(t, 30*time.Second, reconnectBackoffDelay(2*time.Second, 20))
+	assert.Equal(t, 2*time.Second, reconnectBackoffDelay(0, 1))
+}
+
+func TestIngestSessionReconnectBudgetHandling(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bounded_budget_emits_fatal", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		s, err := NewSession(ctx, Config{
+			Address:           "127.0.0.1",
+			RTSPPort:          unavailableRTSPPort(t),
+			ReconnectDelay:    5 * time.Millisecond,
+			MaxReconnectFails: 2,
+		})
+		require.NoError(t, err)
+		defer func() { _ = s.Close() }()
+
+		select {
+		case fatalErr := <-s.Fatal():
+			require.Error(t, fatalErr)
+			assert.Contains(t, fatalErr.Error(), "audio ingest reconnect budget exceeded")
+			assert.Contains(t, fatalErr.Error(), "after 2 consecutive failures")
+		case <-time.After(2 * time.Second):
+			require.FailNow(t, "expected reconnect budget fatal")
+		}
+	})
+
+	t.Run("unbounded_budget_keeps_retrying", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		s, err := NewSession(ctx, Config{
+			Address:           "127.0.0.1",
+			RTSPPort:          unavailableRTSPPort(t),
+			ReconnectDelay:    5 * time.Millisecond,
+			MaxReconnectFails: 0,
+		})
+		require.NoError(t, err)
+		defer func() { _ = s.Close() }()
+
+		select {
+		case fatalErr := <-s.Fatal():
+			require.FailNowf(t, "unexpected fatal", "received fatal in unbounded mode: %v", fatalErr)
+		case <-time.After(150 * time.Millisecond):
+		}
+	})
 }

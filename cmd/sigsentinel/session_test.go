@@ -19,6 +19,8 @@ type fakeSDS200Client struct {
 	resyncStatus  sds200.RuntimeStatus
 	resyncErr     error
 	startPushErr  error
+	modelErr      error
+	firmwareErr   error
 	holdErr       error
 	nextErr       error
 	previousErr   error
@@ -36,10 +38,32 @@ type fakeSDS200Client struct {
 	setSVCErr     error
 	setVolumeErr  error
 	setSquelchErr error
+	enterMenuErr  error
+	menuStatusErr error
+	menuSetErr    error
+	menuBackErr   error
+	analyzeErr    error
+	analyzePRErr  error
+	pushWFErr     error
+	getWFErr      error
+	getDTMErr     error
+	setDTMErr     error
+	getLCRErr     error
+	setLCRErr     error
+	getChargeErr  error
+	keepAliveErr  error
+	powerOffErr   error
 	closeErr      error
 
 	telemetrySnapshot   sds200.RuntimeStatus
 	onTelemetry         func(sds200.RuntimeStatus)
+	model               string
+	firmwareVersion     string
+	menuStatusNode      sds200.XMLNode
+	waterfallData       []int
+	dateTimeStatus      sds200.DateTimeStatus
+	locationRange       sds200.LocationRange
+	chargeStatus        sds200.ChargeStatus
 	favoritesQuickKeys  sds200.QuickKeyState
 	systemQuickKeys     sds200.QuickKeyState
 	departmentQuickKeys sds200.QuickKeyState
@@ -62,6 +86,23 @@ type fakeSDS200Client struct {
 	setSVCCalls     [][]int
 	setVolumeCalls  []int
 	setSquelchCalls []int
+	enterMenuCalls  []menuCall
+	menuSetCalls    []string
+	menuBackCalls   []string
+	analyzeCalls    []analyzeCall
+	analyzePRCalls  []string
+	pushWFCalls     []waterfallCall
+	getWFCalls      []waterfallCall
+	getDTMCalls     int
+	setDTMCalls     []dateTimeCall
+	getLCRCalls     int
+	setLCRCalls     []locationCall
+	keepAliveCalls  int
+	powerOffCalls   int
+	modelCalls      int
+	firmwareCalls   int
+	menuStatusCalls int
+	getChargeCalls  int
 	closeCalls      int
 
 	holdSignal  chan struct{}
@@ -98,6 +139,32 @@ type jumpNumberCall struct {
 	fl    int
 	sys   int
 	chanN int
+}
+
+type menuCall struct {
+	menuID string
+	index  string
+}
+
+type analyzeCall struct {
+	mode   string
+	params []string
+}
+
+type waterfallCall struct {
+	fftType int
+	on      bool
+}
+
+type dateTimeCall struct {
+	daylightSaving int
+	when           time.Time
+}
+
+type locationCall struct {
+	lat string
+	lon string
+	rng string
 }
 
 type quickKeyTarget struct {
@@ -141,6 +208,20 @@ func (f *fakeSDS200Client) StartPushScannerInfo(intervalMS int) error {
 	defer f.mu.Unlock()
 	f.startPushCalls = append(f.startPushCalls, intervalMS)
 	return f.startPushErr
+}
+
+func (f *fakeSDS200Client) Model() (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.modelCalls++
+	return f.model, f.modelErr
+}
+
+func (f *fakeSDS200Client) FirmwareVersion() (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.firmwareCalls++
+	return f.firmwareVersion, f.firmwareErr
 }
 
 func (f *fakeSDS200Client) Hold(tkw, x1, x2 string) error {
@@ -303,6 +384,131 @@ func (f *fakeSDS200Client) SetSquelch(level int) error {
 	return err
 }
 
+func (f *fakeSDS200Client) EnterMenu(menuID, index string) error {
+	f.mu.Lock()
+	f.enterMenuCalls = append(f.enterMenuCalls, menuCall{menuID: menuID, index: index})
+	err := f.enterMenuErr
+	f.mu.Unlock()
+	return err
+}
+
+func (f *fakeSDS200Client) MenuStatus() (sds200.XMLNode, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.menuStatusCalls++
+	return f.menuStatusNode, f.menuStatusErr
+}
+
+func (f *fakeSDS200Client) MenuSetValue(value string) error {
+	f.mu.Lock()
+	f.menuSetCalls = append(f.menuSetCalls, value)
+	err := f.menuSetErr
+	f.mu.Unlock()
+	return err
+}
+
+func (f *fakeSDS200Client) MenuBack(retLevel string) error {
+	f.mu.Lock()
+	f.menuBackCalls = append(f.menuBackCalls, retLevel)
+	err := f.menuBackErr
+	f.mu.Unlock()
+	return err
+}
+
+func (f *fakeSDS200Client) AnalyzeStart(mode string, params ...string) (sds200.CommandResponse, error) {
+	f.mu.Lock()
+	f.analyzeCalls = append(f.analyzeCalls, analyzeCall{
+		mode:   mode,
+		params: append([]string(nil), params...),
+	})
+	err := f.analyzeErr
+	f.mu.Unlock()
+	return sds200.CommandResponse{Fields: []string{"OK"}}, err
+}
+
+func (f *fakeSDS200Client) AnalyzePauseResume(mode string) error {
+	f.mu.Lock()
+	f.analyzePRCalls = append(f.analyzePRCalls, mode)
+	err := f.analyzePRErr
+	f.mu.Unlock()
+	return err
+}
+
+func (f *fakeSDS200Client) PushWaterfallFFT(fftType int, on bool) (sds200.CommandResponse, error) {
+	f.mu.Lock()
+	f.pushWFCalls = append(f.pushWFCalls, waterfallCall{fftType: fftType, on: on})
+	err := f.pushWFErr
+	f.mu.Unlock()
+	return sds200.CommandResponse{Fields: []string{"OK"}}, err
+}
+
+func (f *fakeSDS200Client) GetWaterfallFFT(fftType int, on bool) ([]int, error) {
+	f.mu.Lock()
+	f.getWFCalls = append(f.getWFCalls, waterfallCall{fftType: fftType, on: on})
+	data := append([]int(nil), f.waterfallData...)
+	err := f.getWFErr
+	f.mu.Unlock()
+	return data, err
+}
+
+func (f *fakeSDS200Client) GetDateTime() (sds200.DateTimeStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getDTMCalls++
+	return f.dateTimeStatus, f.getDTMErr
+}
+
+func (f *fakeSDS200Client) SetDateTime(daylightSaving int, t time.Time) error {
+	f.mu.Lock()
+	f.setDTMCalls = append(f.setDTMCalls, dateTimeCall{
+		daylightSaving: daylightSaving,
+		when:           t,
+	})
+	err := f.setDTMErr
+	f.mu.Unlock()
+	return err
+}
+
+func (f *fakeSDS200Client) GetLocationRange() (sds200.LocationRange, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getLCRCalls++
+	return f.locationRange, f.getLCRErr
+}
+
+func (f *fakeSDS200Client) SetLocationRange(lat, lon, rng string) error {
+	f.mu.Lock()
+	f.setLCRCalls = append(f.setLCRCalls, locationCall{
+		lat: lat,
+		lon: lon,
+		rng: rng,
+	})
+	err := f.setLCRErr
+	f.mu.Unlock()
+	return err
+}
+
+func (f *fakeSDS200Client) GetChargeStatus() (sds200.ChargeStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getChargeCalls++
+	return f.chargeStatus, f.getChargeErr
+}
+
+func (f *fakeSDS200Client) KeepAlive() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keepAliveCalls++
+	return f.keepAliveErr
+}
+
+func (f *fakeSDS200Client) PowerOff() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.powerOffCalls++
+	return f.powerOffErr
+}
+
 func (f *fakeSDS200Client) OnTelemetry(handler func(sds200.RuntimeStatus)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -343,6 +549,23 @@ func (f *fakeSDS200Client) snapshot() fakeClientSnapshot {
 		setSVCCalls:     cloneNestedInts(f.setSVCCalls),
 		setVolumeCalls:  append([]int(nil), f.setVolumeCalls...),
 		setSquelchCalls: append([]int(nil), f.setSquelchCalls...),
+		enterMenuCalls:  append([]menuCall(nil), f.enterMenuCalls...),
+		menuSetCalls:    append([]string(nil), f.menuSetCalls...),
+		menuBackCalls:   append([]string(nil), f.menuBackCalls...),
+		analyzeCalls:    append([]analyzeCall(nil), f.analyzeCalls...),
+		analyzePRCalls:  append([]string(nil), f.analyzePRCalls...),
+		pushWFCalls:     append([]waterfallCall(nil), f.pushWFCalls...),
+		getWFCalls:      append([]waterfallCall(nil), f.getWFCalls...),
+		getDTMCalls:     f.getDTMCalls,
+		setDTMCalls:     append([]dateTimeCall(nil), f.setDTMCalls...),
+		getLCRCalls:     f.getLCRCalls,
+		setLCRCalls:     append([]locationCall(nil), f.setLCRCalls...),
+		keepAliveCalls:  f.keepAliveCalls,
+		powerOffCalls:   f.powerOffCalls,
+		modelCalls:      f.modelCalls,
+		firmwareCalls:   f.firmwareCalls,
+		menuStatusCalls: f.menuStatusCalls,
+		getChargeCalls:  f.getChargeCalls,
 		closeCalls:      f.closeCalls,
 		hasTelemetry:    f.onTelemetry != nil,
 	}
@@ -366,6 +589,23 @@ type fakeClientSnapshot struct {
 	setSVCCalls     [][]int
 	setVolumeCalls  []int
 	setSquelchCalls []int
+	enterMenuCalls  []menuCall
+	menuSetCalls    []string
+	menuBackCalls   []string
+	analyzeCalls    []analyzeCall
+	analyzePRCalls  []string
+	pushWFCalls     []waterfallCall
+	getWFCalls      []waterfallCall
+	getDTMCalls     int
+	setDTMCalls     []dateTimeCall
+	getLCRCalls     int
+	setLCRCalls     []locationCall
+	keepAliveCalls  int
+	powerOffCalls   int
+	modelCalls      int
+	firmwareCalls   int
+	menuStatusCalls int
+	getChargeCalls  int
 	closeCalls      int
 	hasTelemetry    bool
 }
@@ -387,7 +627,7 @@ func cloneNestedInts(values [][]int) [][]int {
 func TestSessionConfigWithDefaults(t *testing.T) {
 	t.Parallel()
 
-	t.Run("applies_defaults", func(t *testing.T) {
+	t.Run("applies_config_defaults", func(t *testing.T) {
 		cfg := SessionConfig{}.withDefaults()
 		assert.Equal(t, sds200.DefaultControlPort, cfg.Scanner.ControlPort)
 		assert.Equal(t, 2*time.Second, cfg.ResponseTimeout)
@@ -415,7 +655,19 @@ func TestNewScannerSession(t *testing.T) {
 	})
 
 	t.Run("connects_and_starts_push", func(t *testing.T) {
-		client := &fakeSDS200Client{resyncStatus: sds200.RuntimeStatus{Connected: true, Channel: "ops"}}
+		client := &fakeSDS200Client{
+			resyncStatus: sds200.RuntimeStatus{Connected: true, Channel: "ops"},
+			dateTimeStatus: sds200.DateTimeStatus{
+				DaylightSaving: 1,
+				Time:           time.Date(2026, 3, 9, 8, 45, 30, 0, time.UTC),
+				RTCStatus:      1,
+			},
+			locationRange: sds200.LocationRange{
+				Latitude:  "1.1111",
+				Longitude: "2.2222",
+				Range:     "10",
+			},
+		}
 		hub := newStateHub()
 		session, err := NewScannerSession(t.Context(), SessionConfig{
 			Scanner:        store.ScannerConfig{IP: "127.0.0.1", ControlPort: sds200.DefaultControlPort},
@@ -435,6 +687,10 @@ func TestNewScannerSession(t *testing.T) {
 		state := hub.snapshot()
 		assert.True(t, state.Scanner.Connected)
 		assert.Equal(t, "ops", state.Scanner.Channel)
+		assert.True(t, state.Expert.HasDateTime)
+		assert.Equal(t, 1, state.Expert.DaylightSaving)
+		assert.Equal(t, "1.1111", state.Expert.Latitude)
+		assert.Equal(t, "2.2222", state.Expert.Longitude)
 	})
 }
 
@@ -531,7 +787,7 @@ func TestScannerSessionExecuteIntent(t *testing.T) {
 		assert.Equal(t, "avoid target unavailable for current scanner state", err.Error())
 	})
 
-	t.Run("avoid_requires_tgid_parent_system_index", func(t *testing.T) {
+	t.Run("avoid_requires_tgid_system_index", func(t *testing.T) {
 		client := &fakeSDS200Client{
 			telemetrySnapshot: sds200.RuntimeStatus{
 				HoldTarget: sds200.HoldTarget{Keyword: "TGID", Arg1: "100", Arg2: "2"},
@@ -559,7 +815,7 @@ func TestScannerSessionExecuteIntent(t *testing.T) {
 		assert.Empty(t, client.snapshot().avoidCalls)
 	})
 
-	t.Run("avoid_rejects_unknown_hold_target_keyword", func(t *testing.T) {
+	t.Run("avoid_rejects_unknown_target_keyword", func(t *testing.T) {
 		client := &fakeSDS200Client{
 			telemetrySnapshot: sds200.RuntimeStatus{
 				HoldTarget: sds200.HoldTarget{Keyword: "mystery_mode", Arg1: "2"},
@@ -814,6 +1070,142 @@ func TestScannerSessionExecuteIntent(t *testing.T) {
 		assert.Equal(t, []int{6}, snap.setSquelchCalls)
 	})
 
+	t.Run("menu_enter_requires_menu_id", func(t *testing.T) {
+		client := &fakeSDS200Client{}
+		session := &ScannerSession{client: client}
+
+		err := session.executeIntent(IntentMenuEnter, ControlParams{MenuID: "   "})
+		require.Error(t, err)
+		assert.Equal(t, "menu id is required", err.Error())
+	})
+
+	t.Run("menu_status_updates_expert_state", func(t *testing.T) {
+		client := &fakeSDS200Client{
+			menuStatusNode: sds200.XMLNode{
+				Attrs: map[string]string{"Name": "Main"},
+				Children: []sds200.XMLNode{
+					{XMLName: sds200.XMLNode{}.XMLName, Attrs: map[string]string{"Name": "A"}},
+				},
+			},
+		}
+		hub := newStateHub()
+		session := &ScannerSession{client: client, stateHub: hub}
+
+		require.NoError(t, session.executeIntent(IntentMenuStatus, ControlParams{}))
+		assert.NotEmpty(t, hub.snapshot().Expert.MenuStatusSummary)
+		assert.Equal(t, 1, client.snapshot().menuStatusCalls)
+	})
+
+	t.Run("analyze_start_requires_mode", func(t *testing.T) {
+		client := &fakeSDS200Client{}
+		session := &ScannerSession{client: client}
+
+		err := session.executeIntent(IntentAnalyzeStart, ControlParams{})
+		require.Error(t, err)
+		assert.Equal(t, "analyze mode is required", err.Error())
+	})
+
+	t.Run("set_date_time_calls_client", func(t *testing.T) {
+		client := &fakeSDS200Client{}
+		hub := newStateHub()
+		session := &ScannerSession{client: client, stateHub: hub}
+		when := time.Date(2026, 3, 8, 12, 30, 0, 0, time.UTC)
+
+		err := session.executeIntent(IntentSetDateTime, ControlParams{
+			DaylightSaving: 1,
+			DateTime:       when,
+		})
+		require.NoError(t, err)
+		snap := client.snapshot()
+		require.Len(t, snap.setDTMCalls, 1)
+		assert.Equal(t, 1, snap.setDTMCalls[0].daylightSaving)
+		assert.True(t, snap.setDTMCalls[0].when.Equal(when))
+		assert.Contains(t, hub.snapshot().Expert.DateTimeSummary, "2026-03-08T12:30:00Z")
+	})
+
+	t.Run("get_date_time_updates_state", func(t *testing.T) {
+		when := time.Date(2026, 3, 9, 1, 2, 3, 0, time.UTC)
+		client := &fakeSDS200Client{
+			dateTimeStatus: sds200.DateTimeStatus{
+				DaylightSaving: 1,
+				Time:           when,
+				RTCStatus:      1,
+			},
+		}
+		hub := newStateHub()
+		session := &ScannerSession{client: client, stateHub: hub}
+
+		require.NoError(t, session.executeIntent(IntentGetDateTime, ControlParams{}))
+
+		state := hub.snapshot().Expert
+		assert.True(t, state.HasDateTime)
+		assert.Equal(t, 1, state.DaylightSaving)
+		assert.True(t, state.DateTimeValue.Equal(when))
+		assert.Contains(t, state.DateTimeSummary, "dst=1")
+		assert.Equal(t, 1, client.snapshot().getDTMCalls)
+	})
+
+	t.Run("set_location_range_validates_input", func(t *testing.T) {
+		client := &fakeSDS200Client{}
+		session := &ScannerSession{client: client}
+
+		err := session.executeIntent(IntentSetLocationRange, ControlParams{
+			Latitude:  "95",
+			Longitude: "20",
+			Range:     "5",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "latitude")
+	})
+
+	t.Run("get_location_range_updates_state", func(t *testing.T) {
+		client := &fakeSDS200Client{
+			locationRange: sds200.LocationRange{
+				Latitude:  "3.3333",
+				Longitude: "4.4444",
+				Range:     "5",
+			},
+		}
+		hub := newStateHub()
+		session := &ScannerSession{client: client, stateHub: hub}
+
+		require.NoError(t, session.executeIntent(IntentGetLocationRange, ControlParams{}))
+		state := hub.snapshot().Expert
+		assert.Equal(t, "3.3333", state.Latitude)
+		assert.Equal(t, "4.4444", state.Longitude)
+		assert.Equal(t, "5", state.Range)
+		assert.Contains(t, state.LocationSummary, "3.3333")
+		assert.Equal(t, 1, client.snapshot().getLCRCalls)
+	})
+
+	t.Run("gets_device_info_and_poweroff", func(t *testing.T) {
+		client := &fakeSDS200Client{
+			model:           "SDS200",
+			firmwareVersion: "1.23.4",
+			chargeStatus:    sds200.ChargeStatus{Status: 4, CapacityPct: 100, VoltageMV: 4184, CurrentMA: 0, TempC: 27.65},
+		}
+		hub := newStateHub()
+		session := &ScannerSession{client: client, stateHub: hub}
+
+		require.NoError(t, session.executeIntent(IntentGetDeviceInfo, ControlParams{}))
+		require.NoError(t, session.executeIntent(IntentGetModel, ControlParams{}))
+		require.NoError(t, session.executeIntent(IntentGetFirmware, ControlParams{}))
+		require.NoError(t, session.executeIntent(IntentGetChargeStatus, ControlParams{}))
+		require.NoError(t, session.executeIntent(IntentKeepAlive, ControlParams{}))
+		require.NoError(t, session.executeIntent(IntentPowerOff, ControlParams{Confirmed: true}))
+		err := session.executeIntent(IntentPowerOff, ControlParams{})
+		require.Error(t, err)
+		assert.Equal(t, "power off requires explicit confirmation", err.Error())
+
+		state := hub.snapshot().Expert
+		assert.Equal(t, "SDS200", state.DeviceModel)
+		assert.Equal(t, "1.23.4", state.FirmwareVersion)
+		assert.Contains(t, state.ChargeStatusSummary, "status=4")
+		assert.Contains(t, state.KeepAliveStatus, "ok at")
+		snap := client.snapshot()
+		assert.Equal(t, 1, snap.powerOffCalls)
+	})
+
 	t.Run("quick_keys_require_100", func(t *testing.T) {
 		client := &fakeSDS200Client{}
 		session := &ScannerSession{client: client}
@@ -889,7 +1281,7 @@ func TestScannerSessionReadScanScope(t *testing.T) {
 		assert.Equal(t, "scanner session unavailable", err.Error())
 	})
 
-	t.Run("does_not_hold_session_lock_while_loading_scope", func(t *testing.T) {
+	t.Run("read_scope_releases_session_lock", func(t *testing.T) {
 		started := make(chan struct{}, 1)
 		release := make(chan struct{})
 		client := &blockingFavoritesClient{
@@ -905,11 +1297,7 @@ func TestScannerSessionReadScanScope(t *testing.T) {
 			close(done)
 		}()
 
-		select {
-		case <-started:
-		case <-time.After(300 * time.Millisecond):
-			t.Fatal("timed out waiting for scope read to start")
-		}
+		requireSignal(t, started)
 
 		lockAcquired := make(chan struct{})
 		var writerObservedClient SDS200Client
@@ -919,19 +1307,11 @@ func TestScannerSessionReadScanScope(t *testing.T) {
 			session.mu.Unlock()
 			close(lockAcquired)
 		}()
-		select {
-		case <-lockAcquired:
-			require.NotNil(t, writerObservedClient)
-		case <-time.After(300 * time.Millisecond):
-			t.Fatal("session write lock blocked while scope read was in-flight")
-		}
+		requireSignal(t, lockAcquired)
+		require.NotNil(t, writerObservedClient)
 
 		close(release)
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Fatal("timed out waiting for scope read to finish")
-		}
+		requireSignal(t, done)
 	})
 }
 
@@ -964,7 +1344,7 @@ func TestScannerSessionEnqueueControl(t *testing.T) {
 func TestScannerSessionControlLoop(t *testing.T) {
 	t.Parallel()
 
-	t.Run("executes_control", func(t *testing.T) {
+	t.Run("executes_enqueued_control", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		client := &fakeSDS200Client{
 			telemetrySnapshot: sds200.RuntimeStatus{
@@ -1044,7 +1424,7 @@ func TestScannerSessionExecuteControl(t *testing.T) {
 func TestScannerSessionClose(t *testing.T) {
 	t.Parallel()
 
-	t.Run("closes_once", func(t *testing.T) {
+	t.Run("closes_client_once", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		client := &fakeSDS200Client{}
 		session := &ScannerSession{

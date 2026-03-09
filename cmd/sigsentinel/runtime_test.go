@@ -219,24 +219,6 @@ func TestRuntimeEnqueueControl(t *testing.T) {
 	})
 }
 
-func TestRuntimeExecuteControl(t *testing.T) {
-	t.Parallel()
-
-	t.Run("rejects_nil_runtime", func(t *testing.T) {
-		var runtime *Runtime
-		err := runtime.ExecuteControl(IntentHold, ControlParams{})
-		require.Error(t, err)
-		assert.Equal(t, "runtime session unavailable", err.Error())
-	})
-
-	t.Run("rejects_nil_session", func(t *testing.T) {
-		runtime := &Runtime{}
-		err := runtime.ExecuteControl(IntentHold, ControlParams{})
-		require.Error(t, err)
-		assert.Equal(t, "runtime session unavailable", err.Error())
-	})
-}
-
 func TestRuntimeSaveScanProfile(t *testing.T) {
 	t.Parallel()
 

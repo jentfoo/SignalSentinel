@@ -306,11 +306,34 @@ func (c *Client) GetDateTime() (DateTimeStatus, error) {
 	} else if len(resp.Fields) < 8 {
 		return DateTimeStatus{}, errors.New("dtm response too short")
 	}
-	layout := "2006-01-02 15:04:05"
-	timeText := fmt.Sprintf("%s-%s-%s %s:%s:%s", resp.Fields[1], resp.Fields[2], resp.Fields[3], resp.Fields[4], resp.Fields[5], resp.Fields[6])
-	ts, err := time.Parse(layout, timeText)
+	year, err := strconv.Atoi(strings.TrimSpace(resp.Fields[1]))
 	if err != nil {
-		return DateTimeStatus{}, err
+		return DateTimeStatus{}, fmt.Errorf("invalid dtm year: %w", err)
+	}
+	month, err := strconv.Atoi(strings.TrimSpace(resp.Fields[2]))
+	if err != nil {
+		return DateTimeStatus{}, fmt.Errorf("invalid dtm month: %w", err)
+	}
+	day, err := strconv.Atoi(strings.TrimSpace(resp.Fields[3]))
+	if err != nil {
+		return DateTimeStatus{}, fmt.Errorf("invalid dtm day: %w", err)
+	}
+	hour, err := strconv.Atoi(strings.TrimSpace(resp.Fields[4]))
+	if err != nil {
+		return DateTimeStatus{}, fmt.Errorf("invalid dtm hour: %w", err)
+	}
+	minute, err := strconv.Atoi(strings.TrimSpace(resp.Fields[5]))
+	if err != nil {
+		return DateTimeStatus{}, fmt.Errorf("invalid dtm minute: %w", err)
+	}
+	second, err := strconv.Atoi(strings.TrimSpace(resp.Fields[6]))
+	if err != nil {
+		return DateTimeStatus{}, fmt.Errorf("invalid dtm second: %w", err)
+	}
+	ts := time.Date(year, time.Month(month), day, hour, minute, second, 0, time.UTC)
+	// Validate that out-of-range fields were not silently normalized by time.Date.
+	if ts.Year() != year || int(ts.Month()) != month || ts.Day() != day || ts.Hour() != hour || ts.Minute() != minute || ts.Second() != second {
+		return DateTimeStatus{}, fmt.Errorf("invalid dtm timestamp components: %v", resp.Fields[1:7])
 	}
 	return DateTimeStatus{
 		DaylightSaving: parseIntDefault(resp.Fields[0], 0),

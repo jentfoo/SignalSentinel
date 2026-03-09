@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jentfoo/SignalSentinel/internal/audio/recording"
+	"github.com/jentfoo/SignalSentinel/internal/chanutil"
 	"github.com/jentfoo/SignalSentinel/internal/gui"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -78,7 +79,7 @@ func TestPublishLatestGUIState(t *testing.T) {
 		out := make(chan gui.RuntimeState, 1)
 		want := gui.RuntimeState{Scanner: gui.ScannerStatus{Mode: "scan"}}
 
-		publishLatestGUIState(out, want)
+		chanutil.PublishLatest(out, want)
 
 		got := <-out
 		assert.Equal(t, want, got)
@@ -89,7 +90,7 @@ func TestPublishLatestGUIState(t *testing.T) {
 		out <- gui.RuntimeState{Scanner: gui.ScannerStatus{Mode: "old"}}
 		want := gui.RuntimeState{Scanner: gui.ScannerStatus{Mode: "new"}}
 
-		publishLatestGUIState(out, want)
+		chanutil.PublishLatest(out, want)
 
 		got := <-out
 		assert.Equal(t, want, got)
@@ -106,17 +107,18 @@ func TestMapGUIControlRequest(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Equal(t, IntentJumpNumberTag, intent)
-		assert.Equal(t, 1, params.FavoritesTag)
-		assert.Equal(t, 2, params.SystemTag)
-		assert.Equal(t, 3, params.ChannelTag)
+		assert.Equal(t, ControlParams{FavoritesTag: 1, SystemTag: 2, ChannelTag: 3}, params)
 		assert.Equal(t, "Jump Number Tag", action)
 	})
 
 	t.Run("rejects_unknown_intent", func(t *testing.T) {
-		_, _, _, err := mapGUIControlRequest(gui.ControlRequest{
+		intent, params, action, err := mapGUIControlRequest(gui.ControlRequest{
 			Intent: gui.ControlIntent("bogus"),
 		})
 		require.Error(t, err)
+		assert.Empty(t, intent)
+		assert.Equal(t, ControlParams{}, params)
+		assert.Empty(t, action)
 		assert.Contains(t, err.Error(), "unsupported control intent")
 	})
 
@@ -127,19 +129,86 @@ func TestMapGUIControlRequest(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Equal(t, IntentSetVolume, intent)
-		assert.Equal(t, 17, params.Volume)
+		assert.Equal(t, ControlParams{Volume: 17}, params)
 		assert.Equal(t, "Set Volume", action)
 	})
 
-	t.Run("maps_set_service_types", func(t *testing.T) {
-		intent, params, action, err := mapGUIControlRequest(gui.ControlRequest{
+	t.Run("copies_service_type_values", func(t *testing.T) {
+		req := gui.ControlRequest{
 			Intent:       gui.IntentSetServiceTypes,
 			ServiceTypes: []int{1, 0, 1},
-		})
+		}
+		intent, params, action, err := mapGUIControlRequest(req)
 		require.NoError(t, err)
+		req.ServiceTypes[0] = 0
 		assert.Equal(t, IntentSetServiceTypes, intent)
 		assert.Equal(t, []int{1, 0, 1}, params.ServiceTypes)
 		assert.Equal(t, "Set Service Types", action)
+	})
+
+	t.Run("copies_quick_key_values", func(t *testing.T) {
+		req := gui.ControlRequest{
+			Intent:            gui.IntentSetSQK,
+			ScopeFavoritesTag: 22,
+			QuickKeyValues:    []int{0, 1, 1},
+		}
+		intent, params, action, err := mapGUIControlRequest(req)
+		require.NoError(t, err)
+		req.QuickKeyValues[1] = 0
+		assert.Equal(t, IntentSetSystemQuickKeys, intent)
+		assert.Equal(t, 22, params.ScopeFavoritesTag)
+		assert.Equal(t, []int{0, 1, 1}, params.QuickKeyValues)
+		assert.Equal(t, "Set System Quick Keys", action)
+	})
+
+	t.Run("maps_power_off_confirmation", func(t *testing.T) {
+		intent, params, action, err := mapGUIControlRequest(gui.ControlRequest{
+			Intent:    gui.IntentPowerOff,
+			Confirmed: true,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, IntentPowerOff, intent)
+		assert.Equal(t, ControlParams{Confirmed: true}, params)
+		assert.Equal(t, "Power Off", action)
+	})
+
+	t.Run("maps_set_date_time", func(t *testing.T) {
+		when := time.Date(2026, 3, 8, 12, 30, 15, 0, time.UTC)
+		intent, params, action, err := mapGUIControlRequest(gui.ControlRequest{
+			Intent:         gui.IntentSetDateTime,
+			DaylightSaving: 1,
+			DateTime:       when,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, IntentSetDateTime, intent)
+		assert.Equal(t, 1, params.DaylightSaving)
+		assert.True(t, params.DateTime.Equal(when))
+		params.DateTime = time.Time{}
+		assert.Equal(t, ControlParams{DaylightSaving: 1}, params)
+		assert.Equal(t, "Set Date/Time", action)
+	})
+
+	t.Run("maps_read_only_expert_intents", func(t *testing.T) {
+		tests := []struct {
+			name       string
+			request    gui.ControlRequest
+			wantIntent ControlIntent
+			wantAction string
+		}{
+			{name: "maps_get_device_info", request: gui.ControlRequest{Intent: gui.IntentGetDeviceInfo}, wantIntent: IntentGetDeviceInfo, wantAction: "Get Model/Firmware"},
+			{name: "maps_get_date_time", request: gui.ControlRequest{Intent: gui.IntentGetDateTime}, wantIntent: IntentGetDateTime, wantAction: "Get Date/Time"},
+			{name: "maps_get_location_range", request: gui.ControlRequest{Intent: gui.IntentGetLocationRange}, wantIntent: IntentGetLocationRange, wantAction: "Get Location Range"},
+		}
+		for _, tt := range tests {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				intent, params, action, err := mapGUIControlRequest(tt.request)
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantIntent, intent)
+				assert.Equal(t, ControlParams{}, params)
+				assert.Equal(t, tt.wantAction, action)
+			})
+		}
 	})
 }
 
@@ -153,10 +222,10 @@ func TestDeriveLifecycleMode(t *testing.T) {
 		mode      string
 		want      string
 	}{
-		{name: "disconnected", connected: false, hold: false, mode: "", want: "Disconnected"},
-		{name: "hold", connected: true, hold: true, mode: "Scan", want: "Hold"},
-		{name: "paused_analyze", connected: true, hold: false, mode: "Analyze", want: "Paused/Analyze"},
-		{name: "scanning", connected: true, hold: false, mode: "Scan Mode", want: "Scanning"},
+		{name: "scanner_is_disconnected", connected: false, hold: false, mode: "", want: "Disconnected"},
+		{name: "scanner_is_hold", connected: true, hold: true, mode: "Scan", want: "Hold"},
+		{name: "paused_analyze_mode", connected: true, hold: false, mode: "Analyze", want: "Paused/Analyze"},
+		{name: "scanner_is_scanning", connected: true, hold: false, mode: "Scan Mode", want: "Scanning"},
 	}
 
 	for _, tt := range tests {
@@ -170,15 +239,33 @@ func TestDeriveLifecycleMode(t *testing.T) {
 func TestBuildGUICapabilities(t *testing.T) {
 	t.Parallel()
 
-	t.Run("maps_capabilities", func(t *testing.T) {
+	t.Run("maps_runtime_capabilities", func(t *testing.T) {
 		caps := buildGUICapabilities(map[ControlIntent]CapabilityAvailability{
 			IntentHold:       {Available: true},
 			IntentResumeScan: {Available: false, DisabledReason: "scanner is not in hold mode"},
+			IntentSetVolume:  {Available: true},
 		})
 		require.NotNil(t, caps)
 		assert.True(t, caps[gui.IntentHoldCurrent].Available)
 		assert.False(t, caps[gui.IntentReleaseHold].Available)
 		assert.Equal(t, "scanner is not in hold mode", caps[gui.IntentReleaseHold].DisabledReason)
+		assert.True(t, caps[gui.IntentSetVolume].Available)
+	})
+
+	t.Run("drops_unknown_runtime_intents", func(t *testing.T) {
+		caps := buildGUICapabilities(map[ControlIntent]CapabilityAvailability{
+			IntentHold:              {Available: true},
+			ControlIntent("custom"): {Available: true},
+		})
+		require.NotNil(t, caps)
+		require.Len(t, caps, 1)
+		_, hasCustom := caps[gui.ControlIntent("custom")]
+		assert.False(t, hasCustom)
+	})
+
+	t.Run("returns_nil_when_empty", func(t *testing.T) {
+		assert.Nil(t, buildGUICapabilities(nil))
+		assert.Nil(t, buildGUICapabilities(map[ControlIntent]CapabilityAvailability{}))
 	})
 }
 
@@ -192,15 +279,21 @@ func TestClassifyControlError(t *testing.T) {
 		wantUnsupported bool
 	}{
 		{
-			name:            "unsupported_intent",
+			name:            "unsupported_intent_error",
 			err:             errors.New("unsupported control intent: foo"),
 			wantMessage:     "operation not supported",
 			wantUnsupported: true,
 		},
 		{
-			name:            "invalid_range",
+			name:            "invalid_range_error",
 			err:             errors.New("volume must be in range 0-29"),
 			wantMessage:     "invalid input",
+			wantUnsupported: false,
+		},
+		{
+			name:            "confirmation_required_error",
+			err:             errors.New("power off requires explicit confirmation"),
+			wantMessage:     "confirmation required",
 			wantUnsupported: false,
 		},
 	}
@@ -230,9 +323,9 @@ func TestRecordingStatusChanged(t *testing.T) {
 		next recording.Status
 		want bool
 	}{
-		{name: "same_status", next: base, want: false},
+		{name: "status_is_unchanged", next: base, want: false},
 		{
-			name: "active_changed",
+			name: "active_state_changed",
 			next: func() recording.Status {
 				changed := base
 				changed.Active = false
@@ -241,7 +334,7 @@ func TestRecordingStatusChanged(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "manual_changed",
+			name: "manual_flag_changed",
 			next: func() recording.Status {
 				changed := base
 				changed.Manual = false
@@ -250,7 +343,7 @@ func TestRecordingStatusChanged(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "trigger_changed",
+			name: "trigger_value_changed",
 			next: func() recording.Status {
 				changed := base
 				changed.Trigger = "mixed"
@@ -259,7 +352,7 @@ func TestRecordingStatusChanged(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "start_changed",
+			name: "start_time_changed",
 			next: func() recording.Status {
 				changed := base
 				changed.StartedAt = changed.StartedAt.Add(time.Second)

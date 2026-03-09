@@ -18,7 +18,7 @@ func defaultDocument() *Document {
 func TestDocumentValidate(t *testing.T) {
 	t.Parallel()
 
-	t.Run("valid_document", func(t *testing.T) {
+	t.Run("accepts_valid_document", func(t *testing.T) {
 		doc := defaultDocument()
 		doc.Config.Scanner.IP = testScannerIP
 
@@ -34,7 +34,7 @@ func TestDocumentValidate(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("invalid_port", func(t *testing.T) {
+	t.Run("rejects_invalid_port", func(t *testing.T) {
 		doc := defaultDocument()
 		doc.Config.Scanner.IP = "10.0.2.10"
 		doc.Config.Scanner.ControlPort = 70000
@@ -43,13 +43,13 @@ func TestDocumentValidate(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("nil_document", func(t *testing.T) {
+	t.Run("rejects_nil_document", func(t *testing.T) {
 		var doc *Document
 		err := doc.Validate()
 		require.Error(t, err)
 	})
 
-	t.Run("wrong_version", func(t *testing.T) {
+	t.Run("rejects_wrong_version", func(t *testing.T) {
 		doc := defaultDocument()
 		doc.Config.Scanner.IP = testScannerIP
 		doc.Version = 99
@@ -153,9 +153,10 @@ func TestDocumentApplyDefaults(t *testing.T) {
 		assert.Equal(t, 300, doc.Config.Activity.MinActivityMS)
 		assert.InDelta(t, 0.0, doc.Config.AudioMonitor.GainDB, 0.000001)
 		assert.Equal(t, "system-default", doc.Config.AudioMonitor.OutputDevice)
+		assert.False(t, doc.Config.UI.ExpertModeEnabled)
 	})
 
-	t.Run("derives_recording_min_auto_duration_from_hang_time", func(t *testing.T) {
+	t.Run("derives_min_duration_from_hang", func(t *testing.T) {
 		doc := &Document{}
 		doc.Config.Recording.HangTimeSeconds = 15
 

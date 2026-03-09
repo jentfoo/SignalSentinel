@@ -3,12 +3,34 @@ package main
 import (
 	"context"
 	"sync"
+	"time"
 
+	"github.com/jentfoo/SignalSentinel/internal/chanutil"
 	"github.com/jentfoo/SignalSentinel/internal/sds200"
 )
 
 type RuntimeState struct {
 	Scanner sds200.RuntimeStatus
+	Expert  ExpertRuntimeState
+}
+
+type ExpertRuntimeState struct {
+	MenuStatusSummary   string
+	AnalyzeSummary      string
+	WaterfallSummary    string
+	DateTimeSummary     string
+	DateTimeValue       time.Time
+	DaylightSaving      int
+	HasDateTime         bool
+	LocationSummary     string
+	Latitude            string
+	Longitude           string
+	Range               string
+	DeviceModel         string
+	FirmwareVersion     string
+	ChargeStatusSummary string
+	KeepAliveStatus     string
+	UpdatedAt           time.Time
 }
 
 type stateHub struct {
@@ -30,26 +52,10 @@ func (h *stateHub) snapshot() RuntimeState {
 
 func (h *stateHub) publish(state RuntimeState) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.state = state
-	subs := make([]chan RuntimeState, 0, len(h.subscribers))
 	for _, ch := range h.subscribers {
-		subs = append(subs, ch)
-	}
-	h.mu.Unlock()
-
-	for _, ch := range subs {
-		select {
-		case ch <- state:
-		default:
-			select {
-			case <-ch:
-			default:
-			}
-			select {
-			case ch <- state:
-			default:
-			}
-		}
+		chanutil.PublishLatest(ch, state)
 	}
 }
 
@@ -68,6 +74,7 @@ func (h *stateHub) subscribe(ctx context.Context) <-chan RuntimeState {
 		<-ctx.Done()
 		h.mu.Lock()
 		delete(h.subscribers, id)
+		close(ch)
 		h.mu.Unlock()
 	}()
 

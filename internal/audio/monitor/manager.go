@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jentfoo/SignalSentinel/internal/chanutil"
 )
 
 const (
@@ -232,18 +234,7 @@ func (m *Manager) PushFrame(frame Frame) {
 		if len(samples) == 0 {
 			continue
 		}
-		select {
-		case frameQueue <- samples:
-		default:
-			select {
-			case <-frameQueue:
-			default:
-			}
-			select {
-			case frameQueue <- samples:
-			default:
-			}
-		}
+		chanutil.PublishLatest(frameQueue, samples)
 	}
 }
 
@@ -293,15 +284,18 @@ func (m *Manager) stopLocked() {
 	m.jitter = nil
 	m.updatedAt = time.Now().UTC()
 
-	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	// Unlock only to let worker goroutine exit and call wg.Done().
+	// Worker sees ctx.Err() and returns without acquiring mu.
+	m.mu.Unlock()
 	m.workerWG.Wait()
+	m.mu.Lock()
+
 	if sink != nil {
 		_ = sink.Close()
 	}
-	m.mu.Lock()
 }
 
 func (m *Manager) runWorker(sink Sink, queue <-chan []int16, ctx context.Context) {
@@ -315,6 +309,9 @@ func (m *Manager) runWorker(sink Sink, queue <-chan []int16, ctx context.Context
 				continue
 			}
 			if err := sink.WritePCM(samples); err != nil {
+				if ctx.Err() != nil {
+					return // shutdown path — stopLocked handles cleanup
+				}
 				m.handleWorkerError(err, sink)
 				return
 			}

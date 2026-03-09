@@ -15,6 +15,7 @@ import (
 	"github.com/jentfoo/SignalSentinel/internal/audio/ingest"
 	"github.com/jentfoo/SignalSentinel/internal/audio/monitor"
 	"github.com/jentfoo/SignalSentinel/internal/audio/recording"
+	"github.com/jentfoo/SignalSentinel/internal/chanutil"
 	"github.com/jentfoo/SignalSentinel/internal/gui"
 	"github.com/jentfoo/SignalSentinel/internal/sds200"
 	"github.com/jentfoo/SignalSentinel/internal/store"
@@ -70,8 +71,10 @@ func run(opts cliFlags) error {
 	}()
 	defer func() { _ = audioSession.Close() }()
 
-	toGUIRuntimeState := func(status sds200.RuntimeStatus) gui.RuntimeState {
-		caps := EvaluateCapabilities(runtime.capabilities, RuntimeState{Scanner: status}, false)
+	toGUIRuntimeState := func(state RuntimeState) gui.RuntimeState {
+		status := state.Scanner
+		expertEnabled := runtime.ExpertModeEnabled()
+		caps := EvaluateCapabilities(runtime.capabilities, RuntimeState{Scanner: status}, expertEnabled)
 		recStatus := recorder.Snapshot()
 		monitorStatus := audioMonitor.Snapshot()
 		return gui.RuntimeState{
@@ -113,6 +116,25 @@ func run(opts cliFlags) error {
 				LastError:    monitorStatus.LastError,
 				UpdatedAt:    monitorStatus.UpdatedAt,
 			},
+			Expert: gui.ExpertStatus{
+				Enabled:             expertEnabled,
+				MenuStatusSummary:   state.Expert.MenuStatusSummary,
+				AnalyzeSummary:      state.Expert.AnalyzeSummary,
+				WaterfallSummary:    state.Expert.WaterfallSummary,
+				DateTimeSummary:     state.Expert.DateTimeSummary,
+				DateTimeValue:       state.Expert.DateTimeValue,
+				DaylightSaving:      state.Expert.DaylightSaving,
+				HasDateTime:         state.Expert.HasDateTime,
+				LocationSummary:     state.Expert.LocationSummary,
+				Latitude:            state.Expert.Latitude,
+				Longitude:           state.Expert.Longitude,
+				Range:               state.Expert.Range,
+				DeviceModel:         state.Expert.DeviceModel,
+				FirmwareVersion:     state.Expert.FirmwareVersion,
+				ChargeStatusSummary: state.Expert.ChargeStatusSummary,
+				KeepAliveStatus:     state.Expert.KeepAliveStatus,
+				UpdatedAt:           state.Expert.UpdatedAt,
+			},
 		}
 	}
 
@@ -131,13 +153,14 @@ func run(opts cliFlags) error {
 			AudioMonitorDefaultEnabled: cfg.Config.AudioMonitor.DefaultEnabled,
 			AudioMonitorOutputDevice:   cfg.Config.AudioMonitor.OutputDevice,
 			AudioMonitorGainDB:         cfg.Config.AudioMonitor.GainDB,
+			ExpertModeEnabled:          cfg.Config.UI.ExpertModeEnabled,
 		}
 	}
 
 	fatalErrs := superviseSubsystems(ctx, runtime, audioErrs)
 	guiErr := gui.Run(ctx, gui.Dependencies{
 		Title:           "SignalSentinel",
-		InitialState:    toGUIRuntimeState(runtime.StateSnapshot().Scanner),
+		InitialState:    toGUIRuntimeState(runtime.StateSnapshot()),
 		InitialSettings: initialSettings,
 		SubscribeState: func(subCtx context.Context) <-chan gui.RuntimeState {
 			src := runtime.SubscribeState(subCtx)
@@ -152,7 +175,7 @@ func run(opts cliFlags) error {
 						if !ok {
 							return
 						}
-						publishLatestGUIState(out, toGUIRuntimeState(status.Scanner))
+						chanutil.PublishLatest(out, toGUIRuntimeState(status))
 					}
 				}
 			}()
@@ -326,6 +349,7 @@ func run(opts cliFlags) error {
 				doc.Config.AudioMonitor.DefaultEnabled = settings.AudioMonitorDefaultEnabled
 				doc.Config.AudioMonitor.OutputDevice = strings.TrimSpace(settings.AudioMonitorOutputDevice)
 				doc.Config.AudioMonitor.GainDB = settings.AudioMonitorGainDB
+				doc.Config.UI.ExpertModeEnabled = settings.ExpertModeEnabled
 				return nil
 			}); err != nil {
 				return err
@@ -342,6 +366,9 @@ func run(opts cliFlags) error {
 			}
 			if err := audioMonitor.SetOutputDevice(settings.AudioMonitorOutputDevice); err != nil {
 				return err
+			}
+			if runtime.state != nil {
+				runtime.state.publish(runtime.StateSnapshot())
 			}
 			return nil
 		},
@@ -376,7 +403,7 @@ func executeGUIControl(runtime *Runtime, request gui.ControlRequest) gui.Control
 	}
 	result.Action = action
 
-	capabilities := EvaluateCapabilities(runtime.capabilities, runtime.StateSnapshot(), false)
+	capabilities := EvaluateCapabilities(runtime.capabilities, runtime.StateSnapshot(), runtime.ExpertModeEnabled())
 	if cap, ok := capabilities[intent]; ok && !cap.Available {
 		result.Message = "operation unavailable"
 		result.RawReason = cap.DisabledReason
@@ -384,18 +411,27 @@ func executeGUIControl(runtime *Runtime, request gui.ControlRequest) gui.Control
 		return result
 	}
 
+	if isExpertOperation(intent) {
+		log.Printf("audit: expert operation requested intent=%s command=%s confirmed=%t", intent, result.Command, params.Confirmed)
+	}
 	if err := runtime.ExecuteControl(intent, params); err != nil {
 		message, hint, unsupported := classifyControlError(err)
 		result.Message = message
 		result.RawReason = err.Error()
 		result.RetryHint = hint
 		result.Unsupported = unsupported
+		if isExpertOperation(intent) {
+			log.Printf("audit: expert operation failed intent=%s command=%s reason=%q", intent, result.Command, err.Error())
+		}
 		return result
 	}
 	result.Success = true
-	result.Message = "command executed"
+	result.Message = controlSuccessMessage(runtime.StateSnapshot(), intent)
 	result.RawReason = "-"
 	result.RetryHint = "-"
+	if isExpertOperation(intent) {
+		log.Printf("audit: expert operation succeeded intent=%s command=%s", intent, result.Command)
+	}
 	return result
 }
 
@@ -409,6 +445,8 @@ func classifyControlError(err error) (message string, retryHint string, unsuppor
 		return "operation not supported", "Use an alternative control or verify scanner firmware/mode.", true
 	case strings.Contains(reason, "must be in range"), strings.Contains(reason, "must contain"), strings.Contains(reason, "must be 0 or 1"):
 		return "invalid input", "Adjust control values and retry.", false
+	case strings.Contains(reason, "requires explicit confirmation"):
+		return "confirmation required", "Confirm the risky action and retry.", false
 	case strings.Contains(reason, "unavailable"), strings.Contains(reason, "hold target"):
 		return "operation unavailable in current state", "Wait for a valid hold target or change scan mode, then retry.", false
 	case strings.Contains(reason, "resync failed"):
@@ -416,6 +454,82 @@ func classifyControlError(err error) (message string, retryHint string, unsuppor
 	default:
 		return "command failed", "Retry. If this repeats, check scanner connection and logs.", false
 	}
+}
+
+func isExpertOperation(intent ControlIntent) bool {
+	switch intent {
+	case IntentMenuEnter,
+		IntentMenuStatus,
+		IntentMenuSetValue,
+		IntentMenuBack,
+		IntentAnalyzeStart,
+		IntentAnalyzePauseResume,
+		IntentPushWaterfall,
+		IntentGetWaterfall,
+		IntentSetDateTime,
+		IntentGetDateTime,
+		IntentSetLocationRange,
+		IntentGetLocationRange,
+		IntentGetDeviceInfo,
+		IntentGetModel,
+		IntentGetFirmware,
+		IntentGetChargeStatus,
+		IntentKeepAlive,
+		IntentPowerOff:
+		return true
+	default:
+		return false
+	}
+}
+
+func controlSuccessMessage(state RuntimeState, intent ControlIntent) string {
+	switch intent {
+	case IntentMenuStatus:
+		return orFallback(state.Expert.MenuStatusSummary, "menu status refreshed")
+	case IntentAnalyzeStart:
+		return orFallback(state.Expert.AnalyzeSummary, "analyzer started")
+	case IntentPushWaterfall, IntentGetWaterfall:
+		return orFallback(state.Expert.WaterfallSummary, "waterfall updated")
+	case IntentSetDateTime:
+		return orFallback(state.Expert.DateTimeSummary, "date/time updated")
+	case IntentGetDateTime:
+		return orFallback(state.Expert.DateTimeSummary, "date/time refreshed")
+	case IntentSetLocationRange:
+		return orFallback(state.Expert.LocationSummary, "location range updated")
+	case IntentGetLocationRange:
+		return orFallback(state.Expert.LocationSummary, "location range refreshed")
+	case IntentGetDeviceInfo:
+		model := strings.TrimSpace(state.Expert.DeviceModel)
+		firmware := strings.TrimSpace(state.Expert.FirmwareVersion)
+		if model == "" && firmware == "" {
+			return "device info refreshed"
+		}
+		if model == "" {
+			return "firmware " + firmware
+		}
+		if firmware == "" {
+			return model
+		}
+		return model + " | firmware " + firmware
+	case IntentGetModel:
+		return orFallback(state.Expert.DeviceModel, "model refreshed")
+	case IntentGetFirmware:
+		return orFallback(state.Expert.FirmwareVersion, "firmware refreshed")
+	case IntentGetChargeStatus:
+		return orFallback(state.Expert.ChargeStatusSummary, "charge status refreshed")
+	case IntentKeepAlive:
+		return orFallback(state.Expert.KeepAliveStatus, "keepalive sent")
+	default:
+		return "command executed"
+	}
+}
+
+func orFallback(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func mapGUIControlRequest(request gui.ControlRequest) (ControlIntent, ControlParams, string, error) {
@@ -470,6 +584,69 @@ func mapGUIControlRequest(request gui.ControlRequest) (ControlIntent, ControlPar
 		return IntentSetServiceTypes, ControlParams{
 			ServiceTypes: append([]int(nil), request.ServiceTypes...),
 		}, "Set Service Types", nil
+	case gui.IntentMenuEnter:
+		return IntentMenuEnter, ControlParams{
+			MenuID:    request.MenuID,
+			MenuIndex: request.MenuIndex,
+		}, "Menu Enter", nil
+	case gui.IntentMenuStatus:
+		return IntentMenuStatus, ControlParams{}, "Menu Status", nil
+	case gui.IntentMenuSetValue:
+		return IntentMenuSetValue, ControlParams{
+			MenuValue: request.MenuValue,
+		}, "Menu Set Value", nil
+	case gui.IntentMenuBack:
+		return IntentMenuBack, ControlParams{
+			MenuBackLevel: request.MenuBackLevel,
+		}, "Menu Back", nil
+	case gui.IntentAnalyzeStart:
+		return IntentAnalyzeStart, ControlParams{
+			AnalyzeMode:   request.AnalyzeMode,
+			AnalyzeParams: append([]string(nil), request.AnalyzeParams...),
+		}, "Analyze Start", nil
+	case gui.IntentAnalyzePause:
+		return IntentAnalyzePauseResume, ControlParams{
+			AnalyzeMode: request.AnalyzeMode,
+		}, "Analyze Pause/Resume", nil
+	case gui.IntentPushWaterfall:
+		return IntentPushWaterfall, ControlParams{
+			FFTType:    request.FFTType,
+			FFTEnabled: request.FFTEnabled,
+		}, "Push Waterfall", nil
+	case gui.IntentGetWaterfall:
+		return IntentGetWaterfall, ControlParams{
+			FFTType:    request.FFTType,
+			FFTEnabled: request.FFTEnabled,
+		}, "Get Waterfall", nil
+	case gui.IntentSetDateTime:
+		return IntentSetDateTime, ControlParams{
+			DaylightSaving: request.DaylightSaving,
+			DateTime:       request.DateTime,
+		}, "Set Date/Time", nil
+	case gui.IntentGetDateTime:
+		return IntentGetDateTime, ControlParams{}, "Get Date/Time", nil
+	case gui.IntentSetLocationRange:
+		return IntentSetLocationRange, ControlParams{
+			Latitude:  request.Latitude,
+			Longitude: request.Longitude,
+			Range:     request.Range,
+		}, "Set Location Range", nil
+	case gui.IntentGetLocationRange:
+		return IntentGetLocationRange, ControlParams{}, "Get Location Range", nil
+	case gui.IntentGetDeviceInfo:
+		return IntentGetDeviceInfo, ControlParams{}, "Get Model/Firmware", nil
+	case gui.IntentGetModel:
+		return IntentGetModel, ControlParams{}, "Get Model", nil
+	case gui.IntentGetFirmware:
+		return IntentGetFirmware, ControlParams{}, "Get Firmware", nil
+	case gui.IntentGetChargeStatus:
+		return IntentGetChargeStatus, ControlParams{}, "Get Charge Status", nil
+	case gui.IntentKeepAlive:
+		return IntentKeepAlive, ControlParams{}, "KeepAlive", nil
+	case gui.IntentPowerOff:
+		return IntentPowerOff, ControlParams{
+			Confirmed: request.Confirmed,
+		}, "Power Off", nil
 	default:
 		return "", ControlParams{}, "", fmt.Errorf("unsupported control intent: %s", request.Intent)
 	}
@@ -495,6 +672,24 @@ func buildGUICapabilities(items map[ControlIntent]CapabilityAvailability) map[gu
 		IntentSetSystemQuickKeys,
 		IntentSetDepartmentQuickKeys,
 		IntentSetServiceTypes,
+		IntentMenuEnter,
+		IntentMenuStatus,
+		IntentMenuSetValue,
+		IntentMenuBack,
+		IntentAnalyzeStart,
+		IntentAnalyzePauseResume,
+		IntentPushWaterfall,
+		IntentGetWaterfall,
+		IntentSetDateTime,
+		IntentGetDateTime,
+		IntentSetLocationRange,
+		IntentGetLocationRange,
+		IntentGetDeviceInfo,
+		IntentGetModel,
+		IntentGetFirmware,
+		IntentGetChargeStatus,
+		IntentKeepAlive,
+		IntentPowerOff,
 	}
 	out := make(map[gui.ControlIntent]gui.ControlCapability, len(needed))
 	for _, intent := range needed {
@@ -542,21 +737,6 @@ func superviseSubsystems(ctx context.Context, runtime *Runtime, audioErrs <-chan
 	}()
 
 	return out
-}
-
-func publishLatestGUIState(out chan gui.RuntimeState, state gui.RuntimeState) {
-	select {
-	case out <- state:
-	default:
-		select {
-		case <-out:
-		default:
-		}
-		select {
-		case out <- state:
-		default:
-		}
-	}
 }
 
 func startAudioPipeline(ctx context.Context, runtime *Runtime) (*ingest.Session, *recording.Manager, *monitor.Manager, <-chan error, error) {

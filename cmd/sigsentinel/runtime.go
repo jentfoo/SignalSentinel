@@ -62,9 +62,6 @@ type ProfileScopeSelector struct {
 }
 
 func (r *Runtime) Config() *store.Document {
-	if r == nil {
-		return nil
-	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return cloneDocument(r.doc)
@@ -73,28 +70,25 @@ func (r *Runtime) Config() *store.Document {
 func (r *Runtime) Store() *store.Store { return r.store }
 
 func (r *Runtime) RecordingsPath() string {
-	if r == nil {
-		return ""
-	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.recordingsPath
 }
 
-func (r *Runtime) StateSnapshot() RuntimeState {
-	if r == nil || r.state == nil {
-		return RuntimeState{}
+func (r *Runtime) ExpertModeEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.doc == nil {
+		return false
 	}
+	return r.doc.Config.UI.ExpertModeEnabled
+}
+
+func (r *Runtime) StateSnapshot() RuntimeState {
 	return r.state.snapshot()
 }
 
 func (r *Runtime) SubscribeState(ctx context.Context) <-chan RuntimeState {
-	if r == nil || r.state == nil {
-		ch := make(chan RuntimeState, 1)
-		ch <- RuntimeState{}
-		close(ch)
-		return ch
-	}
 	return r.state.subscribe(ctx)
 }
 
@@ -118,30 +112,18 @@ func (r *Runtime) Wait() error {
 }
 
 func (r *Runtime) Close() error {
-	if r == nil || r.session == nil {
-		return nil
-	}
 	return r.session.Close()
 }
 
 func (r *Runtime) EnqueueControl(intent ControlIntent) {
-	if r == nil || r.session == nil {
-		return
-	}
 	r.session.EnqueueControl(intent)
 }
 
 func (r *Runtime) ExecuteControl(intent ControlIntent, params ControlParams) error {
-	if r == nil || r.session == nil {
-		return errors.New("runtime session unavailable")
-	}
 	return r.session.ExecuteControl(intent, params)
 }
 
 func (r *Runtime) ReadScanScope(favoritesTag, systemTag int) (gui.ScanScopeSnapshot, error) {
-	if r == nil || r.session == nil {
-		return gui.ScanScopeSnapshot{}, errors.New("runtime session unavailable")
-	}
 	return r.session.ReadScanScope(favoritesTag, systemTag)
 }
 
@@ -676,7 +658,7 @@ func StartRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 	sessionCfg.Scanner = doc.Config.Scanner
 
 	hub := newStateHub()
-	if err := ValidateCapabilityDefaults(capabilities, hub.snapshot(), false); err != nil {
+	if err := ValidateCapabilityDefaults(capabilities, hub.snapshot(), doc.Config.UI.ExpertModeEnabled); err != nil {
 		return nil, fmt.Errorf("validate capability defaults: %w", err)
 	}
 	session, err := NewScannerSession(ctx, sessionCfg, hub)

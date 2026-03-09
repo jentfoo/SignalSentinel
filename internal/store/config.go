@@ -26,6 +26,7 @@ type Config struct {
 	Recording    RecordingConfig    `yaml:"recording"`
 	Activity     ActivityConfig     `yaml:"activity"`
 	AudioMonitor AudioMonitorConfig `yaml:"audio_monitor"`
+	UI           UIConfig           `yaml:"ui"`
 }
 
 type ScannerConfig struct {
@@ -55,6 +56,10 @@ type AudioMonitorConfig struct {
 	DefaultEnabled bool    `yaml:"default_enabled"`
 	OutputDevice   string  `yaml:"output_device"`
 	GainDB         float64 `yaml:"gain_db"`
+}
+
+type UIConfig struct {
+	ExpertModeEnabled bool `yaml:"expert_mode_enabled"`
 }
 
 // State contains persisted, app-managed metadata and never scanner live state.

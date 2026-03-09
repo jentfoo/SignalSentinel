@@ -94,7 +94,7 @@ func TestEvaluateCapabilities(t *testing.T) {
 		assert.Equal(t, "hold target unavailable", caps[IntentUnavoid].DisabledReason)
 	})
 
-	t.Run("avoid_rejects_tgid_without_parent_system_index", func(t *testing.T) {
+	t.Run("avoid_rejects_tgid_missing_system", func(t *testing.T) {
 		state := RuntimeState{Scanner: sds200.RuntimeStatus{
 			Connected:  true,
 			HoldTarget: sds200.HoldTarget{Keyword: "TGID", Arg1: "100", Arg2: "2"},
@@ -128,7 +128,7 @@ func TestEvaluateCapabilities(t *testing.T) {
 func TestValidateCapabilityDefaults(t *testing.T) {
 	t.Parallel()
 
-	t.Run("defaults_validate", func(t *testing.T) {
+	t.Run("validates_default_capabilities", func(t *testing.T) {
 		err := ValidateCapabilityDefaults(DefaultCapabilityRegistry(), RuntimeState{}, false)
 		require.NoError(t, err)
 	})

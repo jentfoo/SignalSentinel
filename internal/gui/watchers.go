@@ -148,9 +148,6 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 	if ui.holdButton != nil {
 		ui.holdButton.SetText(holdLabel)
 	}
-	if ui.holdStatusLabel != nil {
-		ui.holdStatusLabel.SetText(boolWord(scanner.Hold, "Yes", "No"))
-	}
 	holdCap := capabilityFor(scanner, holdIntent)
 	nextCap := capabilityFor(scanner, IntentNext)
 	prevCap := capabilityFor(scanner, IntentPrevious)
@@ -271,6 +268,82 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 		}
 	}
 
+	setExpertTabVisible(&ui, state.Expert.Enabled)
+	if ui.expertMenuStatus != nil {
+		ui.expertMenuStatus.SetText(orDash(state.Expert.MenuStatusSummary))
+	}
+	if ui.expertAnalyze != nil {
+		ui.expertAnalyze.SetText(orDash(state.Expert.AnalyzeSummary))
+	}
+	if ui.expertWaterfall != nil {
+		ui.expertWaterfall.SetText(orDash(state.Expert.WaterfallSummary))
+	}
+	if ui.expertDateTime != nil {
+		ui.expertDateTime.SetText(orDash(state.Expert.DateTimeSummary))
+	}
+	if ui.expertDateTimeEntry != nil && state.Expert.HasDateTime && !state.Expert.DateTimeValue.IsZero() {
+		ui.expertDateTimeEntry.SetText(state.Expert.DateTimeValue.UTC().Format("2006-01-02 15:04:05"))
+	}
+	if ui.expertDSTCheck != nil && state.Expert.HasDateTime {
+		ui.expertDSTCheck.SetChecked(state.Expert.DaylightSaving == 1)
+	}
+	if ui.expertLocation != nil {
+		ui.expertLocation.SetText(orDash(state.Expert.LocationSummary))
+	}
+	if ui.expertLatEntry != nil && strings.TrimSpace(state.Expert.Latitude) != "" {
+		ui.expertLatEntry.SetText(strings.TrimSpace(state.Expert.Latitude))
+	}
+	if ui.expertLonEntry != nil && strings.TrimSpace(state.Expert.Longitude) != "" {
+		ui.expertLonEntry.SetText(strings.TrimSpace(state.Expert.Longitude))
+	}
+	if ui.expertRangeEntry != nil && strings.TrimSpace(state.Expert.Range) != "" {
+		ui.expertRangeEntry.SetText(strings.TrimSpace(state.Expert.Range))
+	}
+	if ui.expertModel != nil {
+		ui.expertModel.SetText(orDash(state.Expert.DeviceModel))
+	}
+	if ui.expertFirmware != nil {
+		ui.expertFirmware.SetText(orDash(state.Expert.FirmwareVersion))
+	}
+	if ui.expertCharge != nil {
+		ui.expertCharge.SetText(orDash(state.Expert.ChargeStatusSummary))
+	}
+	if ui.expertKeepAlive != nil {
+		ui.expertKeepAlive.SetText(orDash(state.Expert.KeepAliveStatus))
+	}
+
+	applyExpertControlState := func(button *widget.Button, intent ControlIntent) {
+		if button == nil {
+			return
+		}
+		cap := capabilityFor(scanner, intent)
+		if !state.Expert.Enabled {
+			button.Disable()
+			return
+		}
+		applyControlState(button, cap)
+		if pendingControlAction {
+			button.Disable()
+		}
+	}
+	applyExpertControlState(ui.menuEnterButton, IntentMenuEnter)
+	applyExpertControlState(ui.menuStatusButton, IntentMenuStatus)
+	applyExpertControlState(ui.menuSetButton, IntentMenuSetValue)
+	applyExpertControlState(ui.menuBackButton, IntentMenuBack)
+	applyExpertControlState(ui.analyzeStartButton, IntentAnalyzeStart)
+	applyExpertControlState(ui.analyzePauseButton, IntentAnalyzePause)
+	applyExpertControlState(ui.pushWaterfallButton, IntentPushWaterfall)
+	applyExpertControlState(ui.getWaterfallButton, IntentGetWaterfall)
+	applyExpertControlState(ui.setDateTimeButton, IntentSetDateTime)
+	applyExpertControlState(ui.getDateTimeButton, IntentGetDateTime)
+	applyExpertControlState(ui.syncDateTimeButton, IntentSetDateTime)
+	applyExpertControlState(ui.setLocationButton, IntentSetLocationRange)
+	applyExpertControlState(ui.getLocationButton, IntentGetLocationRange)
+	applyExpertControlState(ui.deviceInfoButton, IntentGetDeviceInfo)
+	applyExpertControlState(ui.chargeButton, IntentGetChargeStatus)
+	applyExpertControlState(ui.keepAliveButton, IntentKeepAlive)
+	applyExpertControlState(ui.powerOffButton, IntentPowerOff)
+
 	ui.activityList.Refresh()
 	if ui.suppressedList != nil {
 		ui.suppressedList.Refresh()
@@ -335,6 +408,14 @@ func applyControlState(button *widget.Button, capability ControlCapability) {
 }
 
 func applyRecordingsLoadResult(model *uiModel, list *widget.List, errLabel *widget.Label, playButton *widget.Button, deleteButton *widget.Button, recs []Recording, loadErr error, forceRefresh bool) {
+	if !forceRefresh {
+		model.mu.Lock()
+		pending := model.pendingRecordingAction
+		model.mu.Unlock()
+		if pending {
+			return
+		}
+	}
 	if loadErr != nil {
 		model.mu.Lock()
 		model.recordingsErr = loadErr.Error()

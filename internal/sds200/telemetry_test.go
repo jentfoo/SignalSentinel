@@ -18,7 +18,7 @@ func TestParseSTS(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:   "valid_lines",
+			name:   "parses_valid_lines",
 			fields: []string{"00000", "line1", "mode1", "line2", "mode2", "line3", "mode3", "line4", "mode4", "line5", "mode5"},
 			want: []DisplayLine{
 				{Text: "line1", Mode: "mode1"},
@@ -29,17 +29,17 @@ func TestParseSTS(t *testing.T) {
 			},
 		},
 		{
-			name:    "invalid_dsp_form",
+			name:    "rejects_invalid_display_form",
 			fields:  []string{"0"},
 			wantErr: true,
 		},
 		{
-			name:    "invalid_dsp_form_character",
+			name:    "rejects_invalid_display_form_character",
 			fields:  []string{"00A00", "line1", "mode1", "line2", "mode2", "line3", "mode3", "line4", "mode4", "line5", "mode5"},
 			wantErr: true,
 		},
 		{
-			name:    "missing_pairs",
+			name:    "rejects_missing_line_pairs",
 			fields:  []string{"00000", "line1"},
 			wantErr: true,
 		},
@@ -64,7 +64,7 @@ func TestParseSTS(t *testing.T) {
 func TestParseGST(t *testing.T) {
 	t.Parallel()
 
-	t.Run("valid_fields", func(t *testing.T) {
+	t.Run("parses_valid_fields", func(t *testing.T) {
 		fields := []string{
 			"00000",
 			"l1", "m1",
@@ -89,7 +89,7 @@ func TestParseGST(t *testing.T) {
 		assert.Equal(t, "0", got.LED2)
 	})
 
-	t.Run("insufficient_fields", func(t *testing.T) {
+	t.Run("rejects_short_field_list", func(t *testing.T) {
 		fields := []string{
 			"00000",
 			"l1", "m1",
@@ -106,7 +106,7 @@ func TestParseGST(t *testing.T) {
 func TestParseScannerInfoXML(t *testing.T) {
 	t.Parallel()
 
-	t.Run("conventional_frequency", func(t *testing.T) {
+	t.Run("parses_conventional_frequency", func(t *testing.T) {
 		raw := []byte(`<?xml version="1.0" encoding="utf-8"?><ScannerInfo Mode="Scan Mode" V_Screen="conventional_scan"><Property VOL="10" SQL="4" Sig="2" Mute="Unmute"/><System Name="Public Safety"/><Department Name="Dispatch"/><ConvFrequency Name="Primary" Freq="460.1000MHz" Hold="On"/></ScannerInfo>`)
 		info, err := ParseScannerInfoXML(raw)
 		require.NoError(t, err)
@@ -117,7 +117,7 @@ func TestParseScannerInfoXML(t *testing.T) {
 		assert.Equal(t, "Public Safety", info.Nodes["System"][0]["Name"])
 	})
 
-	t.Run("trunked_tgid", func(t *testing.T) {
+	t.Run("parses_trunked_tgid", func(t *testing.T) {
 		raw := []byte(`<?xml version="1.0" encoding="utf-8"?><ScannerInfo Mode="Scan Mode" V_Screen="trunk_scan"><Property VOL="12" SQL="3" Sig="5" Mute="Unmute"/><System Name="County P25"/><Department Name="Law Enforcement"/><TGID Name="Dispatch 1" TGID="100" Hold="On"/></ScannerInfo>`)
 		info, err := ParseScannerInfoXML(raw)
 		require.NoError(t, err)
@@ -127,7 +127,7 @@ func TestParseScannerInfoXML(t *testing.T) {
 		assert.Equal(t, "100", info.Nodes["TGID"][0]["TGID"])
 	})
 
-	t.Run("wrong_root_element", func(t *testing.T) {
+	t.Run("rejects_wrong_root_element", func(t *testing.T) {
 		raw := []byte(`<?xml version="1.0" encoding="utf-8"?><GLT><FL Index="0"/></GLT>`)
 		_, err := ParseScannerInfoXML(raw)
 		require.Error(t, err)
@@ -137,7 +137,7 @@ func TestParseScannerInfoXML(t *testing.T) {
 func TestTelemetryStoreSnapshot(t *testing.T) {
 	t.Parallel()
 
-	t.Run("defaults_disconnected", func(t *testing.T) {
+	t.Run("snapshot_defaults_disconnected", func(t *testing.T) {
 		store := NewTelemetryStore()
 		snap := store.Snapshot()
 		assert.False(t, snap.Connected)
@@ -147,7 +147,7 @@ func TestTelemetryStoreSnapshot(t *testing.T) {
 func TestTelemetryStoreUpdateFromSTS(t *testing.T) {
 	t.Parallel()
 
-	t.Run("updates_channel", func(t *testing.T) {
+	t.Run("updates_channel_from_sts", func(t *testing.T) {
 		store := NewTelemetryStore()
 		sts := StatusSTS{
 			DisplayForm: "00000",
@@ -164,7 +164,7 @@ func TestTelemetryStoreUpdateFromSTS(t *testing.T) {
 func TestTelemetryStoreUpdateFromGST(t *testing.T) {
 	t.Parallel()
 
-	t.Run("updates_status", func(t *testing.T) {
+	t.Run("updates_runtime_from_gst", func(t *testing.T) {
 		store := NewTelemetryStore()
 		gst := StatusGST{
 			StatusSTS: StatusSTS{DisplayForm: "00000"},
@@ -193,7 +193,7 @@ func TestTelemetryStoreUpdateFromGST(t *testing.T) {
 func TestTelemetryStoreUpdateFromScannerInfo(t *testing.T) {
 	t.Parallel()
 
-	t.Run("conventional", func(t *testing.T) {
+	t.Run("updates_conventional_runtime", func(t *testing.T) {
 		store := NewTelemetryStore()
 		info := ScannerInfo{
 			Mode:    "Scan Mode",
@@ -227,12 +227,8 @@ func TestTelemetryStoreUpdateFromScannerInfo(t *testing.T) {
 		assert.False(t, updated.Avoided)
 		assert.False(t, updated.ActivityAt.IsZero())
 	})
-}
 
-func TestTelemetryStoreUpdateFromScannerInfoTGID(t *testing.T) {
-	t.Parallel()
-
-	t.Run("trunked_tgid", func(t *testing.T) {
+	t.Run("updates_trunked_tgid_runtime", func(t *testing.T) {
 		store := NewTelemetryStore()
 		info := ScannerInfo{
 			Mode:    "Scan Mode",
@@ -266,7 +262,7 @@ func TestTelemetryStoreUpdateFromScannerInfoTGID(t *testing.T) {
 		assert.True(t, updated.Avoided)
 	})
 
-	t.Run("trunked_tgid_uses_department_system_index_fallback", func(t *testing.T) {
+	t.Run("uses_department_system_fallback", func(t *testing.T) {
 		store := NewTelemetryStore()
 		info := ScannerInfo{
 			Mode:    "Scan Mode",
@@ -286,12 +282,8 @@ func TestTelemetryStoreUpdateFromScannerInfoTGID(t *testing.T) {
 		assert.Equal(t, "100", updated.HoldTarget.Arg1)
 		assert.Equal(t, "7", updated.HoldTarget.SystemIndex)
 	})
-}
 
-func TestTelemetryStoreUpdateFromScannerInfoAvoidFallsThroughEmptyNodeValue(t *testing.T) {
-	t.Parallel()
-
-	t.Run("empty_avoid_fallback", func(t *testing.T) {
+	t.Run("uses_tgid_avoid_fallback", func(t *testing.T) {
 		store := NewTelemetryStore()
 		info := ScannerInfo{
 			Mode:    "Scan Mode",
@@ -308,12 +300,8 @@ func TestTelemetryStoreUpdateFromScannerInfoAvoidFallsThroughEmptyNodeValue(t *t
 		assert.True(t, updated.AvoidKnown)
 		assert.True(t, updated.Avoided)
 	})
-}
 
-func TestTelemetryStoreUpdateFromScannerInfoHoldOff(t *testing.T) {
-	t.Parallel()
-
-	t.Run("hold_off", func(t *testing.T) {
+	t.Run("hold_off_clears_state", func(t *testing.T) {
 		store := NewTelemetryStore()
 		info := ScannerInfo{
 			Mode:    "Scan Mode",
@@ -340,11 +328,11 @@ func TestParseGCSResponse(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "valid_payload",
+			name: "parses_valid_payload",
 			raw:  "GCS,CST=4,VOLT=4184mV:100%,CURR=0000mA,TEMP= 27.65C",
 		},
 		{
-			name:    "invalid_payload",
+			name:    "rejects_invalid_payload",
 			raw:     "BAD",
 			wantErr: true,
 		},
@@ -377,22 +365,22 @@ func TestIsTransmissionActive(t *testing.T) {
 		want   bool
 	}{
 		{
-			name:   "disconnected",
+			name:   "status_is_disconnected",
 			status: RuntimeStatus{Connected: false, SquelchOpen: true, Signal: 5},
 			want:   false,
 		},
 		{
-			name:   "squelch_open",
+			name:   "squelch_open_is_active",
 			status: RuntimeStatus{Connected: true, SquelchOpen: true},
 			want:   true,
 		},
 		{
-			name:   "signal_without_mute",
+			name:   "signal_without_mute_active",
 			status: RuntimeStatus{Connected: true, Signal: 3, Mute: false},
 			want:   true,
 		},
 		{
-			name:   "signal_muted",
+			name:   "signal_muted_is_inactive",
 			status: RuntimeStatus{Connected: true, Signal: 3, Mute: true},
 			want:   false,
 		},

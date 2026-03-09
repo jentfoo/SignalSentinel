@@ -193,7 +193,7 @@ func TestRecordingsEqual(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "equal_recording_slices",
+			name: "returns_equal_recording_slices",
 			a: []Recording{
 				{ID: "1", Channel: "A"},
 			},
@@ -203,13 +203,13 @@ func TestRecordingsEqual(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "different_slice_length",
+			name: "detects_different_slice_length",
 			a:    []Recording{{ID: "1"}},
 			b:    []Recording{},
 			want: false,
 		},
 		{
-			name: "different_slice_values",
+			name: "detects_different_slice_values",
 			a:    []Recording{{ID: "1", Channel: "A"}},
 			b:    []Recording{{ID: "1", Channel: "B"}},
 			want: false,
@@ -292,8 +292,8 @@ func TestTalkgroupOrDash(t *testing.T) {
 		{name: "blank_returns_dash", value: "   ", want: "-"},
 		{name: "all_dashes_returns_dash", value: "---", want: "-"},
 		{name: "tgid_placeholder_returns_dash", value: "TGID: ---", want: "-"},
-		{name: "tgid_value_kept", value: "TGID: 1234", want: "TGID: 1234"},
-		{name: "plain_value_kept", value: "1234", want: "1234"},
+		{name: "tgid_value_is_preserved", value: "TGID: 1234", want: "TGID: 1234"},
+		{name: "plain_value_is_preserved", value: "1234", want: "1234"},
 	}
 
 	for _, tt := range tests {
@@ -315,7 +315,7 @@ func TestFormatFrequency(t *testing.T) {
 		assert.Equal(t, "155.1300 MHz", formatFrequency("155.1300 MHz"))
 	})
 
-	t.Run("blank_returns_dash", func(t *testing.T) {
+	t.Run("frequency_blank_returns_dash", func(t *testing.T) {
 		assert.Equal(t, "-", formatFrequency("   "))
 	})
 }
@@ -329,9 +329,9 @@ func TestFormatSystemChannel(t *testing.T) {
 		channel string
 		want    string
 	}{
-		{name: "both_values", system: "County", channel: "Dispatch", want: "County / Dispatch"},
-		{name: "missing_system", system: "", channel: "Dispatch", want: "- / Dispatch"},
-		{name: "missing_channel", system: "County", channel: "", want: "County / -"},
+		{name: "uses_both_values", system: "County", channel: "Dispatch", want: "County / Dispatch"},
+		{name: "uses_missing_system_placeholder", system: "", channel: "Dispatch", want: "- / Dispatch"},
+		{name: "uses_missing_channel_placeholder", system: "County", channel: "", want: "County / -"},
 	}
 
 	for _, tt := range tests {
@@ -345,7 +345,7 @@ func TestFormatSystemChannel(t *testing.T) {
 func TestOrderedSelectedRecordingIDsLocked(t *testing.T) {
 	t.Parallel()
 
-	t.Run("returns_selected_ids_in_recording_order", func(t *testing.T) {
+	t.Run("returns_ids_in_recording_order", func(t *testing.T) {
 		model := &uiModel{
 			recordings: []Recording{
 				{ID: "a"},
@@ -379,7 +379,7 @@ func TestOrderedSelectedRecordingIDsLocked(t *testing.T) {
 func TestSyncPrimarySelectionLocked(t *testing.T) {
 	t.Parallel()
 
-	t.Run("uses_existing_selected_id_when_present", func(t *testing.T) {
+	t.Run("uses_existing_selected_id", func(t *testing.T) {
 		model := &uiModel{
 			recordings: []Recording{
 				{ID: "x"},
@@ -398,7 +398,7 @@ func TestSyncPrimarySelectionLocked(t *testing.T) {
 		assert.Equal(t, "y", model.selectedID)
 	})
 
-	t.Run("falls_back_to_first_selected_recording", func(t *testing.T) {
+	t.Run("falls_back_to_selected_recording", func(t *testing.T) {
 		model := &uiModel{
 			recordings: []Recording{
 				{ID: "x"},
@@ -416,7 +416,7 @@ func TestSyncPrimarySelectionLocked(t *testing.T) {
 		assert.Equal(t, "z", model.selectedID)
 	})
 
-	t.Run("backfills_selection_from_legacy_selected_clip", func(t *testing.T) {
+	t.Run("backfills_selection_from_legacy_clip", func(t *testing.T) {
 		model := &uiModel{
 			recordings:   []Recording{{ID: "x"}},
 			selectedClip: 0,

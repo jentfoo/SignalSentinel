@@ -520,14 +520,14 @@ func TestGetLocationRange(t *testing.T) {
 
 	client, _ := newCommandTestClient(t, func(req string) []string {
 		if readRequestCommand(req) == cmdLCR {
-			return []string{"LCR,39.1234,-104.5678,10\r"}
+			return []string{"LCR,3.3333,4.4444,10\r"}
 		}
 		return nil
 	})
 
 	loc, err := client.GetLocationRange()
 	require.NoError(t, err)
-	assert.Equal(t, "39.1234", loc.Latitude)
+	assert.Equal(t, "3.3333", loc.Latitude)
 }
 
 func TestSetLocationRange(t *testing.T) {
@@ -539,7 +539,7 @@ func TestSetLocationRange(t *testing.T) {
 		}
 		return nil
 	})
-	require.NoError(t, client.SetLocationRange("39.1", "-104.5", "10"))
+	require.NoError(t, client.SetLocationRange("3.1", "4.5", "10"))
 }
 
 func TestAnalyzeStart(t *testing.T) {

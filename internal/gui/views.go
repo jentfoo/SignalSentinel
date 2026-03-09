@@ -4,11 +4,14 @@ package gui
 
 import (
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 )
 
 type uiViews struct {
 	content             fyne.CanvasObject
+	appTabs             *container.AppTabs
+	expertTab           *container.TabItem
 	connectionLabel     *widget.Label
 	modeLabel           *widget.Label
 	sourceLabel         *widget.Label
@@ -40,7 +43,6 @@ type uiViews struct {
 	commandRetryHint    *widget.Label
 	controlStatus       *widget.Label
 	lifecycleLabel      *widget.Label
-	holdStatusLabel     *widget.Label
 	tagFavEntry         *widget.Entry
 	tagSysEntry         *widget.Entry
 	tagChanEntry        *widget.Entry
@@ -55,6 +57,37 @@ type uiViews struct {
 	monitorApplyButton  *widget.Button
 	monitorStatusLabel  *widget.Label
 	monitorErrorLabel   *widget.Label
+	expertMenuStatus    *widget.Label
+	expertAnalyze       *widget.Label
+	expertWaterfall     *widget.Label
+	expertDateTime      *widget.Label
+	expertLocation      *widget.Label
+	expertModel         *widget.Label
+	expertFirmware      *widget.Label
+	expertCharge        *widget.Label
+	expertKeepAlive     *widget.Label
+	expertDateTimeEntry *widget.Entry
+	expertDSTCheck      *widget.Check
+	expertLatEntry      *widget.Entry
+	expertLonEntry      *widget.Entry
+	expertRangeEntry    *widget.Entry
+	menuEnterButton     *widget.Button
+	menuStatusButton    *widget.Button
+	menuSetButton       *widget.Button
+	menuBackButton      *widget.Button
+	analyzeStartButton  *widget.Button
+	analyzePauseButton  *widget.Button
+	pushWaterfallButton *widget.Button
+	getWaterfallButton  *widget.Button
+	setDateTimeButton   *widget.Button
+	getDateTimeButton   *widget.Button
+	syncDateTimeButton  *widget.Button
+	setLocationButton   *widget.Button
+	getLocationButton   *widget.Button
+	deviceInfoButton    *widget.Button
+	chargeButton        *widget.Button
+	keepAliveButton     *widget.Button
+	powerOffButton      *widget.Button
 	playButton          *widget.Button
 	stopButton          *widget.Button
 	deleteButton        *widget.Button

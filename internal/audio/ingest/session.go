@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jentfoo/SignalSentinel/internal/chanutil"
 	"github.com/jentfoo/SignalSentinel/internal/sds200"
 )
 
@@ -215,18 +216,7 @@ func (s *Session) runOnce() error {
 			continue
 		}
 		frame := Frame{Samples: samples, ReceivedAt: time.Now(), RTPTimestamp: rtpTS}
-		select {
-		case s.frames <- frame:
-		default:
-			select {
-			case <-s.frames:
-			default:
-			}
-			select {
-			case s.frames <- frame:
-			default:
-			}
-		}
+		chanutil.PublishLatest(s.frames, frame)
 	}
 }
 

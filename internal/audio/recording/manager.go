@@ -442,16 +442,7 @@ func (m *Manager) finalize(at time.Time) error {
 		FileSize:  size,
 		Trigger:   trigger,
 	}
-	m.writer = nil
-	m.path = ""
-	m.started = time.Time{}
-	m.lastSeen = time.Time{}
-	m.clipInfo = sds200.RuntimeStatus{}
-	m.trigger = ""
-	m.manual = false
-	m.clearAutoStartPendingLocked()
-	m.totalSamples = 0
-	m.nonSilentSamples = 0
+	m.resetClipLocked()
 	if m.cfg.OnFinalized != nil {
 		if err := m.cfg.OnFinalized(meta); err != nil {
 			return fmt.Errorf("on finalized callback: %w", err)
@@ -464,6 +455,10 @@ func (m *Manager) abortWriter() {
 	if m.writer != nil {
 		_ = m.writer.Abort()
 	}
+	m.resetClipLocked()
+}
+
+func (m *Manager) resetClipLocked() {
 	m.writer = nil
 	m.path = ""
 	m.started = time.Time{}

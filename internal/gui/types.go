@@ -23,6 +23,25 @@ const (
 	IntentSetSQK          ControlIntent = "set_system_quick_keys"
 	IntentSetDQK          ControlIntent = "set_department_quick_keys"
 	IntentSetServiceTypes ControlIntent = "set_service_types"
+
+	IntentMenuEnter        ControlIntent = "menu_enter"
+	IntentMenuStatus       ControlIntent = "menu_status"
+	IntentMenuSetValue     ControlIntent = "menu_set_value"
+	IntentMenuBack         ControlIntent = "menu_back"
+	IntentAnalyzeStart     ControlIntent = "analyze_start"
+	IntentAnalyzePause     ControlIntent = "analyze_pause_resume"
+	IntentPushWaterfall    ControlIntent = "push_waterfall"
+	IntentGetWaterfall     ControlIntent = "get_waterfall"
+	IntentSetDateTime      ControlIntent = "set_date_time"
+	IntentGetDateTime      ControlIntent = "get_date_time"
+	IntentSetLocationRange ControlIntent = "set_location_range"
+	IntentGetLocationRange ControlIntent = "get_location_range"
+	IntentGetDeviceInfo    ControlIntent = "get_device_info"
+	IntentGetModel         ControlIntent = "get_model"
+	IntentGetFirmware      ControlIntent = "get_firmware"
+	IntentGetChargeStatus  ControlIntent = "get_charge_status"
+	IntentKeepAlive        ControlIntent = "keep_alive"
+	IntentPowerOff         ControlIntent = "power_off"
 )
 
 const IntentResumeScan = IntentReleaseHold
@@ -45,6 +64,20 @@ type ControlRequest struct {
 	ServiceTypes      []int
 	Volume            int
 	Squelch           int
+	MenuID            string
+	MenuIndex         string
+	MenuValue         string
+	MenuBackLevel     string
+	AnalyzeMode       string
+	AnalyzeParams     []string
+	FFTType           int
+	FFTEnabled        bool
+	DaylightSaving    int
+	DateTime          time.Time
+	Latitude          string
+	Longitude         string
+	Range             string
+	Confirmed         bool
 }
 
 type ControlResult struct {
@@ -68,6 +101,7 @@ type RuntimeState struct {
 	Scanner   ScannerStatus
 	Recording RecordingStatus
 	Monitor   MonitorStatus
+	Expert    ExpertStatus
 }
 
 type ScannerStatus struct {
@@ -125,6 +159,26 @@ type MonitorStatus struct {
 	UpdatedAt    time.Time
 }
 
+type ExpertStatus struct {
+	Enabled             bool
+	MenuStatusSummary   string
+	AnalyzeSummary      string
+	WaterfallSummary    string
+	DateTimeSummary     string
+	DateTimeValue       time.Time
+	DaylightSaving      int
+	HasDateTime         bool
+	LocationSummary     string
+	Latitude            string
+	Longitude           string
+	Range               string
+	DeviceModel         string
+	FirmwareVersion     string
+	ChargeStatusSummary string
+	KeepAliveStatus     string
+	UpdatedAt           time.Time
+}
+
 type ScanScopeSnapshot struct {
 	FavoritesTag        int
 	SystemTag           int
@@ -171,6 +225,7 @@ type Settings struct {
 	AudioMonitorDefaultEnabled bool
 	AudioMonitorOutputDevice   string
 	AudioMonitorGainDB         float64
+	ExpertModeEnabled          bool
 }
 
 type Dependencies struct {

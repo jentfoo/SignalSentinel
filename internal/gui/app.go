@@ -73,6 +73,23 @@ func Run(ctx context.Context, deps Dependencies) error {
 	stateCtx, cancelState := context.WithCancel(ctx)
 	defer cancelState()
 
+	var closeWindowOnce sync.Once
+	closeWindow := func() {
+		closeWindowOnce.Do(func() {
+			window.SetCloseIntercept(nil)
+			window.Close()
+		})
+	}
+	requestShutdown := func() {
+		cancelState()
+		fyne.Do(closeWindow)
+	}
+
+	window.SetCloseIntercept(func() {
+		cancelState()
+		closeWindow()
+	})
+
 	go watchState(stateCtx, deps, ui, model)
 	go pollRecordings(stateCtx, deps, ui, model)
 	go watchRecordingDuration(stateCtx, ui, model)
@@ -84,9 +101,7 @@ func Run(ctx context.Context, deps Dependencies) error {
 
 	go func() {
 		<-stateCtx.Done()
-		fyne.Do(func() {
-			window.Close()
-		})
+		requestShutdown()
 	}()
 
 	window.ShowAndRun()
@@ -108,7 +123,10 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 	scopePanel := buildScopePanel(model, deps, window, runScanControl, applyControlResult)
 	views.activityList, views.suppressedList = buildActivityLists(model)
 	recordingsPanel, stopPlayback := buildRecordingsPanel(model, deps, window, &views)
-	settingsPanel := buildSettingsPanel(model, deps, window)
+	expertPanel := buildExpertPanel(model, deps, window, runScanControl, &views)
+	settingsPanel := buildSettingsPanel(model, deps, window, func(enabled bool) {
+		setExpertTabVisible(&views, enabled)
+	})
 
 	tabs := container.NewAppTabs(
 		container.NewTabItem("Status", statusPanel),
@@ -120,16 +138,41 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 		container.NewTabItem("Recordings", recordingsPanel),
 		container.NewTabItem("Settings", settingsPanel),
 	)
-	views.content = tabs
+	expertTab := container.NewTabItem("Expert", container.NewVScroll(expertPanel))
+	views.appTabs = tabs
+	views.expertTab = expertTab
 
 	model.mu.Lock()
 	initialState := model.state
 	pendingRecordingAction := model.pendingRecordingAction
 	pendingRecordingStop := model.pendingRecordingStop
 	model.mu.Unlock()
+
+	setExpertTabVisible(&views, initialState.Expert.Enabled)
+	views.content = tabs
+
 	applyRecordingButtonState(views.startRecButton, initialState, pendingRecordingAction, pendingRecordingStop, time.Now())
 
 	return views, stopPlayback
+}
+
+func setExpertTabVisible(views *uiViews, visible bool) {
+	if views == nil || views.appTabs == nil || views.expertTab == nil {
+		return
+	}
+	hasTab := false
+	for _, item := range views.appTabs.Items {
+		if item == views.expertTab {
+			hasTab = true
+			break
+		}
+	}
+	switch {
+	case visible && !hasTab:
+		views.appTabs.Append(views.expertTab)
+	case !visible && hasTab:
+		views.appTabs.Remove(views.expertTab)
+	}
 }
 
 func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, views *uiViews) (fyne.CanvasObject, func(ControlRequest), func(ControlResult)) {
@@ -148,7 +191,6 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	muteLabel := widget.NewLabel("-")
 	volumeLabel := widget.NewLabel("-")
 	updatedLabel := widget.NewLabel("-")
-	holdStatusLabel := widget.NewLabel("-")
 	sourceLabel.Wrapping = fyne.TextWrapWord
 	systemLabel.Wrapping = fyne.TextWrapWord
 	deptLabel.Wrapping = fyne.TextWrapWord
@@ -185,8 +227,10 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	qshFreqEntry.SetText("4600000")
 	volumeEntry := widget.NewEntry()
 	volumeEntry.SetText("10")
+	volumeEntry.SetPlaceHolder("0-29")
 	squelchEntry := widget.NewEntry()
 	squelchEntry.SetText("5")
+	squelchEntry.SetPlaceHolder("0-19")
 	qshFreqField := container.NewGridWrap(fyne.NewSize(140, qshFreqEntry.MinSize().Height), qshFreqEntry)
 	startRecButton := widget.NewButton("Start Recording", nil)
 	monitorListenButton := widget.NewButton("Listen", nil)
@@ -563,7 +607,6 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	views.muteLabel = muteLabel
 	views.volumeLabel = volumeLabel
 	views.updatedLabel = updatedLabel
-	views.holdStatusLabel = holdStatusLabel
 	views.holdButton = holdButton
 	views.nextButton = nextButton
 	views.previousButton = previousButton
@@ -1160,6 +1203,357 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 	)
 }
 
+func buildExpertPanel(model *uiModel, deps Dependencies, window fyne.Window, runScanControl func(ControlRequest), views *uiViews) fyne.CanvasObject {
+	menuStatusLabel := widget.NewLabel("-")
+	analyzeLabel := widget.NewLabel("-")
+	waterfallLabel := widget.NewLabel("-")
+	dateTimeLabel := widget.NewLabel("-")
+	locationLabel := widget.NewLabel("-")
+	modelLabel := widget.NewLabel("-")
+	firmwareLabel := widget.NewLabel("-")
+	chargeLabel := widget.NewLabel("-")
+	keepAliveLabel := widget.NewLabel("-")
+	menuStatusLabel.Wrapping = fyne.TextWrapWord
+	analyzeLabel.Wrapping = fyne.TextWrapWord
+	waterfallLabel.Wrapping = fyne.TextWrapWord
+	dateTimeLabel.Wrapping = fyne.TextWrapWord
+	locationLabel.Wrapping = fyne.TextWrapWord
+	modelLabel.Wrapping = fyne.TextWrapWord
+	firmwareLabel.Wrapping = fyne.TextWrapWord
+	chargeLabel.Wrapping = fyne.TextWrapWord
+	keepAliveLabel.Wrapping = fyne.TextWrapWord
+
+	menuIDEntry := widget.NewEntry()
+	menuIDEntry.SetText("TOP")
+	menuIndexEntry := widget.NewEntry()
+	menuValueEntry := widget.NewEntry()
+	menuBackEntry := widget.NewEntry()
+	menuBackEntry.SetText("RETURN_PREVOUS_MODE")
+
+	analyzeModeEntry := widget.NewEntry()
+	analyzeModeEntry.SetText("SYSTEM_STATUS")
+	analyzeParamsEntry := widget.NewEntry()
+	analyzeParamsEntry.SetPlaceHolder("param1,param2")
+
+	fftTypeEntry := widget.NewEntry()
+	fftTypeEntry.SetText("1")
+	fftEnabled := widget.NewCheck("Enable stream", nil)
+	fftEnabled.SetChecked(true)
+
+	model.mu.Lock()
+	initialExpert := model.state.Expert
+	model.mu.Unlock()
+
+	dateTimeEntry := widget.NewEntry()
+	if initialExpert.HasDateTime && !initialExpert.DateTimeValue.IsZero() {
+		dateTimeEntry.SetText(initialExpert.DateTimeValue.UTC().Format("2006-01-02 15:04:05"))
+	} else {
+		dateTimeEntry.SetText(time.Now().UTC().Format("2006-01-02 15:04:05"))
+	}
+	dstCheck := widget.NewCheck("DST Enabled", nil)
+	if initialExpert.HasDateTime {
+		dstCheck.SetChecked(initialExpert.DaylightSaving == 1)
+	}
+	latEntry := widget.NewEntry()
+	if strings.TrimSpace(initialExpert.Latitude) != "" {
+		latEntry.SetText(strings.TrimSpace(initialExpert.Latitude))
+	}
+	lonEntry := widget.NewEntry()
+	if strings.TrimSpace(initialExpert.Longitude) != "" {
+		lonEntry.SetText(strings.TrimSpace(initialExpert.Longitude))
+	}
+	rangeEntry := widget.NewEntry()
+	if strings.TrimSpace(initialExpert.Range) != "" {
+		rangeEntry.SetText(strings.TrimSpace(initialExpert.Range))
+	}
+
+	menuEnterButton := widget.NewButton("Menu Enter", nil)
+	menuStatusButton := widget.NewButton("Menu Status", nil)
+	menuSetButton := widget.NewButton("Menu Set", nil)
+	menuBackButton := widget.NewButton("Menu Back", nil)
+	analyzeStartButton := widget.NewButton("Analyze Start", nil)
+	analyzePauseButton := widget.NewButton("Analyze Pause/Resume", nil)
+	pushWaterfallButton := widget.NewButton("Push FFT", nil)
+	getWaterfallButton := widget.NewButton("Get FFT", nil)
+	setDateTimeButton := widget.NewButton("Set Date/Time", nil)
+	getDateTimeButton := widget.NewButton("Read Date/Time", nil)
+	syncDateTimeButton := widget.NewButton("Sync Date/Time", nil)
+	setLocationButton := widget.NewButton("Set Location", nil)
+	getLocationButton := widget.NewButton("Read Location", nil)
+	deviceInfoButton := widget.NewButton("Read Model/Firmware", nil)
+	chargeButton := widget.NewButton("Read Charge", nil)
+	keepAliveButton := widget.NewButton("Send KeepAlive", nil)
+	powerOffButton := widget.NewButton("Power Off", nil)
+
+	menuEnterButton.OnTapped = func() {
+		runScanControl(ControlRequest{
+			Intent:    IntentMenuEnter,
+			MenuID:    strings.TrimSpace(menuIDEntry.Text),
+			MenuIndex: strings.TrimSpace(menuIndexEntry.Text),
+		})
+	}
+	menuStatusButton.OnTapped = func() {
+		runScanControl(ControlRequest{Intent: IntentMenuStatus})
+	}
+	menuSetButton.OnTapped = func() {
+		runScanControl(ControlRequest{
+			Intent:    IntentMenuSetValue,
+			MenuValue: strings.TrimSpace(menuValueEntry.Text),
+		})
+	}
+	menuBackButton.OnTapped = func() {
+		runScanControl(ControlRequest{
+			Intent:        IntentMenuBack,
+			MenuBackLevel: strings.TrimSpace(menuBackEntry.Text),
+		})
+	}
+	analyzeStartButton.OnTapped = func() {
+		params := parseCSVValues(analyzeParamsEntry.Text)
+		runScanControl(ControlRequest{
+			Intent:        IntentAnalyzeStart,
+			AnalyzeMode:   strings.TrimSpace(analyzeModeEntry.Text),
+			AnalyzeParams: params,
+		})
+	}
+	analyzePauseButton.OnTapped = func() {
+		runScanControl(ControlRequest{
+			Intent:      IntentAnalyzePause,
+			AnalyzeMode: strings.TrimSpace(analyzeModeEntry.Text),
+		})
+	}
+	pushWaterfallButton.OnTapped = func() {
+		fftType, err := parseIntEntry("FFT type", fftTypeEntry)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		runScanControl(ControlRequest{
+			Intent:     IntentPushWaterfall,
+			FFTType:    fftType,
+			FFTEnabled: fftEnabled.Checked,
+		})
+	}
+	getWaterfallButton.OnTapped = func() {
+		fftType, err := parseIntEntry("FFT type", fftTypeEntry)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		runScanControl(ControlRequest{
+			Intent:     IntentGetWaterfall,
+			FFTType:    fftType,
+			FFTEnabled: fftEnabled.Checked,
+		})
+	}
+	setDateTimeButton.OnTapped = func() {
+		when, err := parseDateTimeInput(dateTimeEntry.Text)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		daylightSaving := 0
+		if dstCheck.Checked {
+			daylightSaving = 1
+		}
+		runScanControl(ControlRequest{
+			Intent:         IntentSetDateTime,
+			DaylightSaving: daylightSaving,
+			DateTime:       when,
+		})
+	}
+	getDateTimeButton.OnTapped = func() {
+		runScanControl(ControlRequest{Intent: IntentGetDateTime})
+	}
+	syncDateTimeButton.OnTapped = func() {
+		now := time.Now()
+		dateTimeEntry.SetText(now.Format("2006-01-02 15:04:05"))
+		daylightSaving := 0
+		if dstCheck.Checked {
+			daylightSaving = 1
+		}
+		runScanControl(ControlRequest{
+			Intent:         IntentSetDateTime,
+			DaylightSaving: daylightSaving,
+			DateTime:       now,
+		})
+	}
+	setLocationButton.OnTapped = func() {
+		runScanControl(ControlRequest{
+			Intent:    IntentSetLocationRange,
+			Latitude:  strings.TrimSpace(latEntry.Text),
+			Longitude: strings.TrimSpace(lonEntry.Text),
+			Range:     strings.TrimSpace(rangeEntry.Text),
+		})
+	}
+	getLocationButton.OnTapped = func() {
+		runScanControl(ControlRequest{Intent: IntentGetLocationRange})
+	}
+	deviceInfoButton.OnTapped = func() {
+		runScanControl(ControlRequest{Intent: IntentGetDeviceInfo})
+	}
+	chargeButton.OnTapped = func() {
+		runScanControl(ControlRequest{Intent: IntentGetChargeStatus})
+	}
+	keepAliveButton.OnTapped = func() {
+		runScanControl(ControlRequest{Intent: IntentKeepAlive})
+	}
+	powerOffButton.OnTapped = func() {
+		dialog.ShowConfirm("Power Off", "Power off the unit now?", func(ok bool) {
+			if !ok {
+				return
+			}
+			runScanControl(ControlRequest{
+				Intent:    IntentPowerOff,
+				Confirmed: true,
+			})
+		}, window)
+	}
+
+	views.expertMenuStatus = menuStatusLabel
+	views.expertAnalyze = analyzeLabel
+	views.expertWaterfall = waterfallLabel
+	views.expertDateTime = dateTimeLabel
+	views.expertLocation = locationLabel
+	views.expertModel = modelLabel
+	views.expertFirmware = firmwareLabel
+	views.expertCharge = chargeLabel
+	views.expertKeepAlive = keepAliveLabel
+	views.expertDateTimeEntry = dateTimeEntry
+	views.expertDSTCheck = dstCheck
+	views.expertLatEntry = latEntry
+	views.expertLonEntry = lonEntry
+	views.expertRangeEntry = rangeEntry
+	views.menuEnterButton = menuEnterButton
+	views.menuStatusButton = menuStatusButton
+	views.menuSetButton = menuSetButton
+	views.menuBackButton = menuBackButton
+	views.analyzeStartButton = analyzeStartButton
+	views.analyzePauseButton = analyzePauseButton
+	views.pushWaterfallButton = pushWaterfallButton
+	views.getWaterfallButton = getWaterfallButton
+	views.setDateTimeButton = setDateTimeButton
+	views.getDateTimeButton = getDateTimeButton
+	views.syncDateTimeButton = syncDateTimeButton
+	views.setLocationButton = setLocationButton
+	views.getLocationButton = getLocationButton
+	views.deviceInfoButton = deviceInfoButton
+	views.chargeButton = chargeButton
+	views.keepAliveButton = keepAliveButton
+	views.powerOffButton = powerOffButton
+
+	return container.NewVBox(
+		widget.NewCard("Menu Operations", "", container.NewVBox(
+			container.NewHBox(
+				widget.NewLabel("Menu ID"),
+				container.NewGridWrap(fyne.NewSize(160, menuIDEntry.MinSize().Height), menuIDEntry),
+				widget.NewLabel("Index"),
+				container.NewGridWrap(fyne.NewSize(160, menuIndexEntry.MinSize().Height), menuIndexEntry),
+				menuEnterButton,
+				menuStatusButton,
+			),
+			container.NewHBox(
+				widget.NewLabel("Value"),
+				container.NewGridWrap(fyne.NewSize(280, menuValueEntry.MinSize().Height), menuValueEntry),
+				menuSetButton,
+			),
+			container.NewHBox(
+				widget.NewLabel("Back Mode"),
+				container.NewGridWrap(fyne.NewSize(220, menuBackEntry.MinSize().Height), menuBackEntry),
+				menuBackButton,
+			),
+			widget.NewForm(widget.NewFormItem("Status", menuStatusLabel)),
+		)),
+		widget.NewCard("Analyze and Waterfall", "", container.NewVBox(
+			container.NewHBox(
+				widget.NewLabel("Mode"),
+				container.NewGridWrap(fyne.NewSize(200, analyzeModeEntry.MinSize().Height), analyzeModeEntry),
+				widget.NewLabel("Params"),
+				container.NewGridWrap(fyne.NewSize(260, analyzeParamsEntry.MinSize().Height), analyzeParamsEntry),
+				analyzeStartButton,
+				analyzePauseButton,
+			),
+			container.NewHBox(
+				widget.NewLabel("FFT Type"),
+				container.NewGridWrap(fyne.NewSize(80, fftTypeEntry.MinSize().Height), fftTypeEntry),
+				fftEnabled,
+				pushWaterfallButton,
+				getWaterfallButton,
+			),
+			widget.NewForm(
+				widget.NewFormItem("Analyze", analyzeLabel),
+				widget.NewFormItem("Waterfall", waterfallLabel),
+			),
+		)),
+		widget.NewCard("Time and Location", "", container.NewVBox(
+			container.NewHBox(
+				widget.NewLabel("Date/Time"),
+				container.NewGridWrap(fyne.NewSize(220, dateTimeEntry.MinSize().Height), dateTimeEntry),
+				dstCheck,
+				getDateTimeButton,
+				setDateTimeButton,
+				syncDateTimeButton,
+			),
+			container.NewHBox(
+				widget.NewLabel("Lat"),
+				container.NewGridWrap(fyne.NewSize(130, latEntry.MinSize().Height), latEntry),
+				widget.NewLabel("Lon"),
+				container.NewGridWrap(fyne.NewSize(130, lonEntry.MinSize().Height), lonEntry),
+				widget.NewLabel("Range"),
+				container.NewGridWrap(fyne.NewSize(100, rangeEntry.MinSize().Height), rangeEntry),
+				setLocationButton,
+				getLocationButton,
+			),
+			widget.NewForm(
+				widget.NewFormItem("Date/Time", dateTimeLabel),
+				widget.NewFormItem("Location", locationLabel),
+			),
+		)),
+		widget.NewCard("Device Health", "", container.NewVBox(
+			container.NewHBox(deviceInfoButton, chargeButton, keepAliveButton),
+			widget.NewForm(
+				widget.NewFormItem("Model", modelLabel),
+				widget.NewFormItem("Firmware", firmwareLabel),
+				widget.NewFormItem("Charge", chargeLabel),
+				widget.NewFormItem("KeepAlive", keepAliveLabel),
+			),
+		)),
+		widget.NewCard("Danger Zone", "", container.NewVBox(
+			powerOffButton,
+		)),
+	)
+}
+
+func parseCSVValues(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trim := strings.TrimSpace(part)
+		if trim == "" {
+			continue
+		}
+		out = append(out, trim)
+	}
+	return out
+}
+
+func parseDateTimeInput(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, errors.New("date/time is required")
+	}
+	layouts := []string{
+		"2006-01-02 15:04:05",
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+	}
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.UTC(), nil
+		}
+	}
+	return time.Time{}, errors.New("date/time must be RFC3339 or YYYY-MM-DD HH:MM:SS")
+}
+
 func buildActivityLists(model *uiModel) (*widget.List, *widget.List) {
 	activityList := widget.NewList(
 		func() int {
@@ -1442,10 +1836,16 @@ func buildRecordingsPanel(model *uiModel, deps Dependencies, window fyne.Window,
 				return
 			}
 			deleteButton.Disable()
+			model.mu.Lock()
+			model.pendingRecordingAction = true
+			model.mu.Unlock()
 			go func(ids []string) {
 				report, err := deps.DeleteRecordings(ids)
 				recs, loadErr := deps.LoadRecordings()
 				fyne.Do(func() {
+					model.mu.Lock()
+					model.pendingRecordingAction = false
+					model.mu.Unlock()
 					applyRecordingsLoadResult(model, recordingsList, recordingsErrLabel, playButton, deleteButton, recs, loadErr, true)
 					if err != nil {
 						dialog.ShowError(err, window)
@@ -1483,7 +1883,7 @@ func buildRecordingsPanel(model *uiModel, deps Dependencies, window fyne.Window,
 	return panel, stopCurrentPlayback
 }
 
-func buildSettingsPanel(model *uiModel, deps Dependencies, window fyne.Window) fyne.CanvasObject {
+func buildSettingsPanel(model *uiModel, deps Dependencies, window fyne.Window, onExpertModeChanged func(bool)) fyne.CanvasObject {
 	model.mu.Lock()
 	currentActivity := model.activity
 	model.mu.Unlock()
@@ -1502,6 +1902,8 @@ func buildSettingsPanel(model *uiModel, deps Dependencies, window fyne.Window) f
 	activityEndEntry.SetText(strconv.Itoa(deps.InitialSettings.Activity.EndDebounceMS))
 	monitorDefaultCheck := widget.NewCheck("Enable listen on startup", nil)
 	monitorDefaultCheck.SetChecked(deps.InitialSettings.AudioMonitorDefaultEnabled)
+	expertModeCheck := widget.NewCheck("Enable expert operations panel", nil)
+	expertModeCheck.SetChecked(deps.InitialSettings.ExpertModeEnabled)
 	monitorGainEntry := widget.NewEntry()
 	monitorGainEntry.SetText(fmt.Sprintf("%.1f", deps.InitialSettings.AudioMonitorGainDB))
 	monitorOutputOptions := []string{"system-default"}
@@ -1566,6 +1968,7 @@ func buildSettingsPanel(model *uiModel, deps Dependencies, window fyne.Window) f
 			AudioMonitorDefaultEnabled: monitorDefaultCheck.Checked,
 			AudioMonitorOutputDevice:   strings.TrimSpace(monitorOutputSelect.Selected),
 			AudioMonitorGainDB:         gainValue,
+			ExpertModeEnabled:          expertModeCheck.Checked,
 		}
 		restartRequired := settings.ScannerIP != currentScannerIP
 		saveSettings.Disable()
@@ -1581,6 +1984,9 @@ func buildSettingsPanel(model *uiModel, deps Dependencies, window fyne.Window) f
 				model.activity = normalizeActivitySettings(settings.Activity)
 				model.mu.Unlock()
 				currentScannerIP = settings.ScannerIP
+				if onExpertModeChanged != nil {
+					onExpertModeChanged(settings.ExpertModeEnabled)
+				}
 				if restartRequired {
 					dialog.ShowInformation("Settings", "Settings saved. Restart the app to apply scanner connection changes.", window)
 				}
@@ -1598,6 +2004,7 @@ func buildSettingsPanel(model *uiModel, deps Dependencies, window fyne.Window) f
 		widget.NewFormItem("Audio Monitor", monitorDefaultCheck),
 		widget.NewFormItem("Monitor Gain (dB)", monitorGainEntry),
 		widget.NewFormItem("Monitor Output Device", monitorOutputSelect),
+		widget.NewFormItem("Expert Mode", expertModeCheck),
 	)
 	return container.NewVBox(settingsForm, saveSettings)
 }

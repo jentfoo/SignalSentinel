@@ -48,7 +48,7 @@ func TestApplyState(t *testing.T) {
 		assert.Equal(t, "All visible controls available.", ui.controlStatus.Text)
 	})
 
-	t.Run("pending_control_action_keeps_buttons_disabled", func(t *testing.T) {
+	t.Run("pending_control_keeps_buttons_disabled", func(t *testing.T) {
 		model := &uiModel{selectedClip: -1, pendingControlAction: true}
 		ui := newTestUIViews(model)
 
@@ -447,7 +447,6 @@ func newTestUIViews(model *uiModel) uiViews {
 		commandStatus:    widget.NewLabel(""),
 		commandMessage:   widget.NewLabel(""),
 		controlStatus:    widget.NewLabel(""),
-		holdStatusLabel:  widget.NewLabel(""),
 		tagFavEntry:      widget.NewEntry(),
 		tagSysEntry:      widget.NewEntry(),
 		tagChanEntry:     widget.NewEntry(),

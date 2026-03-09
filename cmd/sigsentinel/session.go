@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,8 @@ import (
 )
 
 type SDS200Client interface {
+	Model() (string, error)
+	FirmwareVersion() (string, error)
 	Resync() (sds200.RuntimeStatus, error)
 	StartPushScannerInfo(intervalMS int) error
 	Hold(tkw, x1, x2 string) error
@@ -35,6 +39,21 @@ type SDS200Client interface {
 	SetServiceTypes(values []int) error
 	SetVolume(level int) error
 	SetSquelch(level int) error
+	EnterMenu(menuID, index string) error
+	MenuStatus() (sds200.XMLNode, error)
+	MenuSetValue(value string) error
+	MenuBack(retLevel string) error
+	AnalyzeStart(mode string, params ...string) (sds200.CommandResponse, error)
+	AnalyzePauseResume(mode string) error
+	PushWaterfallFFT(fftType int, on bool) (sds200.CommandResponse, error)
+	GetWaterfallFFT(fftType int, on bool) ([]int, error)
+	GetDateTime() (sds200.DateTimeStatus, error)
+	SetDateTime(daylightSaving int, t time.Time) error
+	GetLocationRange() (sds200.LocationRange, error)
+	SetLocationRange(lat, lon, rng string) error
+	GetChargeStatus() (sds200.ChargeStatus, error)
+	KeepAlive() error
+	PowerOff() error
 	OnTelemetry(handler func(sds200.RuntimeStatus))
 	TelemetrySnapshot() sds200.RuntimeStatus
 	Close() error
@@ -126,6 +145,20 @@ type ControlParams struct {
 	ServiceTypes      []int
 	Volume            int
 	Squelch           int
+	MenuID            string
+	MenuIndex         string
+	MenuValue         string
+	MenuBackLevel     string
+	AnalyzeMode       string
+	AnalyzeParams     []string
+	FFTType           int
+	FFTEnabled        bool
+	DaylightSaving    int
+	DateTime          time.Time
+	Latitude          string
+	Longitude         string
+	Range             string
+	Confirmed         bool
 }
 
 type controlRequest struct {
@@ -158,6 +191,7 @@ const (
 	IntentSetSquelch ControlIntent = "set_squelch"
 
 	IntentMenuEnter    ControlIntent = "menu_enter"
+	IntentMenuStatus   ControlIntent = "menu_status"
 	IntentMenuSetValue ControlIntent = "menu_set_value"
 	IntentMenuBack     ControlIntent = "menu_back"
 
@@ -167,7 +201,13 @@ const (
 	IntentGetWaterfall       ControlIntent = "get_waterfall"
 
 	IntentSetDateTime      ControlIntent = "set_date_time"
+	IntentGetDateTime      ControlIntent = "get_date_time"
 	IntentSetLocationRange ControlIntent = "set_location_range"
+	IntentGetLocationRange ControlIntent = "get_location_range"
+	IntentGetDeviceInfo    ControlIntent = "get_device_info"
+	IntentGetModel         ControlIntent = "get_model"
+	IntentGetFirmware      ControlIntent = "get_firmware"
+	IntentGetChargeStatus  ControlIntent = "get_charge_status"
 	IntentKeepAlive        ControlIntent = "keep_alive"
 	IntentPowerOff         ControlIntent = "power_off"
 )
@@ -351,6 +391,7 @@ func (s *ScannerSession) connectAndSync() error {
 		_ = old.Close()
 	}
 	s.publishScannerState(status)
+	s.refreshExpertTimeLocation(client)
 	log.Printf("session: scanner session connected and synchronized")
 	return nil
 }
@@ -493,6 +534,190 @@ func (s *ScannerSession) executeIntent(intent ControlIntent, params ControlParam
 		return client.SetVolume(params.Volume)
 	case IntentSetSquelch:
 		return client.SetSquelch(params.Squelch)
+	case IntentMenuEnter:
+		menuID := strings.TrimSpace(params.MenuID)
+		if menuID == "" {
+			return errors.New("menu id is required")
+		}
+		return client.EnterMenu(menuID, strings.TrimSpace(params.MenuIndex))
+	case IntentMenuStatus:
+		node, err := client.MenuStatus()
+		if err != nil {
+			return err
+		}
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			expert.MenuStatusSummary = summarizeMenuStatus(node)
+		})
+		return nil
+	case IntentMenuSetValue:
+		value := strings.TrimSpace(params.MenuValue)
+		if value == "" {
+			return errors.New("menu value is required")
+		}
+		return client.MenuSetValue(value)
+	case IntentMenuBack:
+		level := strings.TrimSpace(params.MenuBackLevel)
+		if level == "" {
+			level = "RETURN_PREVOUS_MODE"
+		}
+		return client.MenuBack(level)
+	case IntentAnalyzeStart:
+		mode := strings.TrimSpace(params.AnalyzeMode)
+		if mode == "" {
+			return errors.New("analyze mode is required")
+		}
+		resp, err := client.AnalyzeStart(mode, params.AnalyzeParams...)
+		if err != nil {
+			return err
+		}
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			expert.AnalyzeSummary = summarizeCommandResponse(resp)
+		})
+		return nil
+	case IntentAnalyzePauseResume:
+		mode := strings.TrimSpace(params.AnalyzeMode)
+		if mode == "" {
+			return errors.New("analyze mode is required")
+		}
+		return client.AnalyzePauseResume(mode)
+	case IntentPushWaterfall:
+		if err := validateFFTType(params.FFTType); err != nil {
+			return err
+		}
+		resp, err := client.PushWaterfallFFT(params.FFTType, params.FFTEnabled)
+		if err != nil {
+			return err
+		}
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			expert.WaterfallSummary = summarizeCommandResponse(resp)
+		})
+		return nil
+	case IntentGetWaterfall:
+		if err := validateFFTType(params.FFTType); err != nil {
+			return err
+		}
+		values, err := client.GetWaterfallFFT(params.FFTType, params.FFTEnabled)
+		if err != nil {
+			return err
+		}
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			expert.WaterfallSummary = summarizeFFT(values)
+		})
+		return nil
+	case IntentSetDateTime:
+		if params.DaylightSaving != 0 && params.DaylightSaving != 1 {
+			return fmt.Errorf("daylight saving must be 0 or 1 (got %d)", params.DaylightSaving)
+		}
+		if params.DateTime.IsZero() {
+			return errors.New("date/time value is required")
+		}
+		if err := client.SetDateTime(params.DaylightSaving, params.DateTime); err != nil {
+			return err
+		}
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			expert.DateTimeValue = params.DateTime.UTC()
+			expert.DaylightSaving = params.DaylightSaving
+			expert.HasDateTime = true
+			expert.DateTimeSummary = fmt.Sprintf("set to %s (dst=%d)", expert.DateTimeValue.Format(time.RFC3339), params.DaylightSaving)
+		})
+		return nil
+	case IntentGetDateTime:
+		status, err := client.GetDateTime()
+		if err != nil {
+			return err
+		}
+		if status.Time.IsZero() {
+			return errors.New("date/time response missing time")
+		}
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			applyDateTimeToExpert(expert, status)
+		})
+		return nil
+	case IntentSetLocationRange:
+		lat := strings.TrimSpace(params.Latitude)
+		lon := strings.TrimSpace(params.Longitude)
+		rng := strings.TrimSpace(params.Range)
+		if err := validateLocationRange(lat, lon, rng); err != nil {
+			return err
+		}
+		if err := client.SetLocationRange(lat, lon, rng); err != nil {
+			return err
+		}
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			expert.Latitude = lat
+			expert.Longitude = lon
+			expert.Range = rng
+			expert.LocationSummary = fmt.Sprintf("lat=%s lon=%s range=%s", lat, lon, rng)
+		})
+		return nil
+	case IntentGetLocationRange:
+		status, err := client.GetLocationRange()
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(status.Latitude) == "" && strings.TrimSpace(status.Longitude) == "" && strings.TrimSpace(status.Range) == "" {
+			return errors.New("location response is empty")
+		}
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			applyLocationToExpert(expert, status)
+		})
+		return nil
+	case IntentGetDeviceInfo:
+		model, err := client.Model()
+		if err != nil {
+			return err
+		}
+		version, err := client.FirmwareVersion()
+		if err != nil {
+			return err
+		}
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			expert.DeviceModel = strings.TrimSpace(model)
+			expert.FirmwareVersion = strings.TrimSpace(version)
+		})
+		return nil
+	case IntentGetModel:
+		model, err := client.Model()
+		if err != nil {
+			return err
+		}
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			expert.DeviceModel = strings.TrimSpace(model)
+		})
+		return nil
+	case IntentGetFirmware:
+		version, err := client.FirmwareVersion()
+		if err != nil {
+			return err
+		}
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			expert.FirmwareVersion = strings.TrimSpace(version)
+		})
+		return nil
+	case IntentGetChargeStatus:
+		charge, err := client.GetChargeStatus()
+		if err != nil {
+			return err
+		}
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			expert.ChargeStatusSummary = summarizeChargeStatus(charge)
+		})
+		return nil
+	case IntentKeepAlive:
+		err := client.KeepAlive()
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			if err != nil {
+				expert.KeepAliveStatus = "failed: " + err.Error()
+				return
+			}
+			expert.KeepAliveStatus = "ok at " + time.Now().UTC().Format(time.RFC3339)
+		})
+		return err
+	case IntentPowerOff:
+		if !params.Confirmed {
+			return errors.New("power off requires explicit confirmation")
+		}
+		return client.PowerOff()
 	default:
 		return fmt.Errorf("unsupported control intent: %s", intent)
 	}
@@ -561,6 +786,47 @@ func (s *ScannerSession) resyncAfterScopeChange(client SDS200Client) error {
 	return nil
 }
 
+func (s *ScannerSession) refreshExpertTimeLocation(client SDS200Client) {
+	if client == nil {
+		return
+	}
+	dt, dtErr := client.GetDateTime()
+	if dtErr == nil && !dt.Time.IsZero() {
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			applyDateTimeToExpert(expert, dt)
+		})
+	}
+	loc, locErr := client.GetLocationRange()
+	if locErr == nil &&
+		(strings.TrimSpace(loc.Latitude) != "" || strings.TrimSpace(loc.Longitude) != "" || strings.TrimSpace(loc.Range) != "") {
+		s.updateExpertState(func(expert *ExpertRuntimeState) {
+			applyLocationToExpert(expert, loc)
+		})
+	}
+}
+
+func applyDateTimeToExpert(expert *ExpertRuntimeState, dt sds200.DateTimeStatus) {
+	expert.DateTimeValue = dt.Time.UTC()
+	expert.DaylightSaving = dt.DaylightSaving
+	expert.HasDateTime = true
+	expert.DateTimeSummary = fmt.Sprintf(
+		"%s (dst=%d rtc=%d)",
+		expert.DateTimeValue.Format(time.RFC3339),
+		dt.DaylightSaving,
+		dt.RTCStatus,
+	)
+}
+
+func applyLocationToExpert(expert *ExpertRuntimeState, loc sds200.LocationRange) {
+	expert.Latitude = strings.TrimSpace(loc.Latitude)
+	expert.Longitude = strings.TrimSpace(loc.Longitude)
+	expert.Range = strings.TrimSpace(loc.Range)
+	expert.LocationSummary = fmt.Sprintf(
+		"lat=%s lon=%s range=%s",
+		expert.Latitude, expert.Longitude, expert.Range,
+	)
+}
+
 func validateQuickKeyTag(name string, value int) error {
 	if value < 0 || value > 99 {
 		return fmt.Errorf("%s must be in range 0-99 (got %d)", name, value)
@@ -606,11 +872,119 @@ func quickKeyStateToValues(state sds200.QuickKeyState) []int {
 	return slices.Clone(state[:])
 }
 
+func validateFFTType(value int) error {
+	if value < 0 || value > 9 {
+		return fmt.Errorf("fft type must be in range 0-9 (got %d)", value)
+	}
+	return nil
+}
+
+func validateLocationRange(lat, lon, rng string) error {
+	latV, err := strconv.ParseFloat(lat, 64)
+	if err != nil {
+		return errors.New("latitude must be numeric")
+	}
+	lonV, err := strconv.ParseFloat(lon, 64)
+	if err != nil {
+		return errors.New("longitude must be numeric")
+	}
+	rngV, err := strconv.ParseFloat(rng, 64)
+	if err != nil {
+		return errors.New("range must be numeric")
+	}
+	if math.IsNaN(latV) || latV < -90 || latV > 90 {
+		return errors.New("latitude must be in range -90 to 90")
+	}
+	if math.IsNaN(lonV) || lonV < -180 || lonV > 180 {
+		return errors.New("longitude must be in range -180 to 180")
+	}
+	if math.IsNaN(rngV) || rngV <= 0 {
+		return errors.New("range must be > 0")
+	}
+	return nil
+}
+
+func summarizeMenuStatus(node sds200.XMLNode) string {
+	parts := make([]string, 0, 3)
+	if name := strings.TrimSpace(node.Attrs["Name"]); name != "" {
+		parts = append(parts, "name="+name)
+	}
+	itemNames := make([]string, 0, 3)
+	for _, child := range node.Children {
+		if !strings.EqualFold(child.XMLName.Local, "MenuItem") {
+			continue
+		}
+		value := strings.TrimSpace(child.Attrs["Name"])
+		if value == "" {
+			value = strings.TrimSpace(child.Content)
+		}
+		if value == "" {
+			continue
+		}
+		itemNames = append(itemNames, value)
+		if len(itemNames) >= 3 {
+			break
+		}
+	}
+	if len(itemNames) > 0 {
+		parts = append(parts, "items="+strings.Join(itemNames, " | "))
+	}
+	if len(parts) == 0 {
+		return "menu status received"
+	}
+	return strings.Join(parts, " ; ")
+}
+
+func summarizeCommandResponse(resp sds200.CommandResponse) string {
+	if len(resp.Fields) == 0 {
+		return "ok"
+	}
+	return strings.Join(resp.Fields, ",")
+}
+
+func summarizeFFT(values []int) string {
+	if len(values) == 0 {
+		return "no fft data"
+	}
+	limit := len(values)
+	if limit > 8 {
+		limit = 8
+	}
+	head := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		head = append(head, strconv.Itoa(values[i]))
+	}
+	return fmt.Sprintf("%d bins: [%s]", len(values), strings.Join(head, ", "))
+}
+
+func summarizeChargeStatus(status sds200.ChargeStatus) string {
+	return fmt.Sprintf(
+		"status=%d cap=%d%% volt=%dmV curr=%dmA temp=%.2fC",
+		status.Status,
+		status.CapacityPct,
+		status.VoltageMV,
+		status.CurrentMA,
+		status.TempC,
+	)
+}
+
+func (s *ScannerSession) updateExpertState(update func(*ExpertRuntimeState)) {
+	if s == nil || s.stateHub == nil || update == nil {
+		return
+	}
+	state := s.stateHub.snapshot()
+	update(&state.Expert)
+	state.Expert.UpdatedAt = time.Now().UTC()
+	s.stateHub.publish(state)
+}
+
 func (s *ScannerSession) publishScannerState(status sds200.RuntimeStatus) {
 	if s.stateHub == nil {
 		return
 	}
-	s.stateHub.publish(RuntimeState{Scanner: status})
+	state := s.stateHub.snapshot()
+	state.Scanner = status
+	s.stateHub.publish(state)
 }
 
 func (s *ScannerSession) signalFatal(err error) {

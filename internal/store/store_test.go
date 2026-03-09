@@ -58,8 +58,6 @@ func TestStoreLoad(t *testing.T) {
 }
 
 func TestStoreSave(t *testing.T) {
-	t.Parallel()
-
 	t.Run("save_then_load", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "runtime.yaml")
 		s := New(path)
@@ -101,9 +99,7 @@ func TestStoreSave(t *testing.T) {
 		require.Len(t, loaded.State.ScanProfiles, 1)
 		assert.Equal(t, "default", loaded.State.ScanProfiles[0].Name)
 	})
-}
 
-func TestStoreSaveDefaultPath(t *testing.T) {
 	t.Run("empty_path_uses_default", func(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("HOME", home)
@@ -126,7 +122,7 @@ func TestStoreSaveDefaultPath(t *testing.T) {
 func TestStoreAppendRecording(t *testing.T) {
 	t.Parallel()
 
-	t.Run("appends_entry", func(t *testing.T) {
+	t.Run("appends_recording_entry", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "runtime.yaml")
 		s := New(path)
 		doc := defaultDocument()

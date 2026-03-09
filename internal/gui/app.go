@@ -108,7 +108,7 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 	scopePanel := buildScopePanel(model, deps, window, runScanControl, applyControlResult)
 	views.activityList, views.suppressedList = buildActivityLists(model)
 	recordingsPanel, stopPlayback := buildRecordingsPanel(model, deps, window, &views)
-	settingsPanel := buildSettingsPanel(deps, window)
+	settingsPanel := buildSettingsPanel(model, deps, window)
 
 	tabs := container.NewAppTabs(
 		container.NewTabItem("Status", statusPanel),
@@ -1484,12 +1484,23 @@ func buildRecordingsPanel(model *uiModel, deps Dependencies, window fyne.Window,
 	return panel, stopCurrentPlayback
 }
 
-func buildSettingsPanel(deps Dependencies, window fyne.Window) fyne.CanvasObject {
+func buildSettingsPanel(model *uiModel, deps Dependencies, window fyne.Window) fyne.CanvasObject {
+	model.mu.Lock()
+	currentActivity := model.activity
+	model.mu.Unlock()
+
 	ipEntry := widget.NewEntry()
 	ipEntry.SetText(deps.InitialSettings.ScannerIP)
 	pathEntry := widget.NewEntry()
 	pathEntry.SetText(deps.InitialSettings.RecordingsPath)
-	hangLabel := widget.NewLabel(fmt.Sprintf("%ds", deps.InitialSettings.HangTimeSeconds))
+	hangEntry := widget.NewEntry()
+	hangEntry.SetText(strconv.Itoa(deps.InitialSettings.HangTimeSeconds))
+	minAutoDurationEntry := widget.NewEntry()
+	minAutoDurationEntry.SetText(strconv.Itoa(deps.InitialSettings.MinAutoDurationSeconds))
+	activityStartEntry := widget.NewEntry()
+	activityStartEntry.SetText(strconv.Itoa(deps.InitialSettings.Activity.StartDebounceMS))
+	activityEndEntry := widget.NewEntry()
+	activityEndEntry.SetText(strconv.Itoa(deps.InitialSettings.Activity.EndDebounceMS))
 	monitorDefaultCheck := widget.NewCheck("Enable listen on startup", nil)
 	monitorDefaultCheck.SetChecked(deps.InitialSettings.AudioMonitorDefaultEnabled)
 	monitorGainEntry := widget.NewEntry()
@@ -1514,6 +1525,26 @@ func buildSettingsPanel(deps Dependencies, window fyne.Window) fyne.CanvasObject
 
 	saveSettings := widget.NewButton("Save Settings", nil)
 	saveSettings.OnTapped = func() {
+		hangSeconds, err := parseIntEntry("Hang-time", hangEntry)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		minAutoDurationSeconds, err := parseIntEntry("Auto clip minimum duration", minAutoDurationEntry)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		activityStartMS, err := parseIntEntry("Activity start debounce", activityStartEntry)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+		activityEndMS, err := parseIntEntry("Activity end debounce", activityEndEntry)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
 		gainText := strings.TrimSpace(monitorGainEntry.Text)
 		if gainText == "" {
 			gainText = "0"
@@ -1524,10 +1555,15 @@ func buildSettingsPanel(deps Dependencies, window fyne.Window) fyne.CanvasObject
 			return
 		}
 		settings := Settings{
-			ScannerIP:                  strings.TrimSpace(ipEntry.Text),
-			RecordingsPath:             strings.TrimSpace(pathEntry.Text),
-			HangTimeSeconds:            deps.InitialSettings.HangTimeSeconds,
-			HangTimeChanged:            false, // v1 settings view displays hang-time but does not edit it.
+			ScannerIP:              strings.TrimSpace(ipEntry.Text),
+			RecordingsPath:         strings.TrimSpace(pathEntry.Text),
+			HangTimeSeconds:        hangSeconds,
+			MinAutoDurationSeconds: minAutoDurationSeconds,
+			Activity: ActivitySettings{
+				StartDebounceMS: activityStartMS,
+				EndDebounceMS:   activityEndMS,
+				MinActivityMS:   currentActivity.MinActivityMS,
+			},
 			AudioMonitorDefaultEnabled: monitorDefaultCheck.Checked,
 			AudioMonitorOutputDevice:   strings.TrimSpace(monitorOutputSelect.Selected),
 			AudioMonitorGainDB:         gainValue,
@@ -1542,6 +1578,9 @@ func buildSettingsPanel(deps Dependencies, window fyne.Window) fyne.CanvasObject
 					dialog.ShowError(err, window)
 					return
 				}
+				model.mu.Lock()
+				model.activity = normalizeActivitySettings(settings.Activity)
+				model.mu.Unlock()
 				currentScannerIP = settings.ScannerIP
 				if restartRequired {
 					dialog.ShowInformation("Settings", "Settings saved. Restart the app to apply scanner connection changes.", window)
@@ -1553,7 +1592,10 @@ func buildSettingsPanel(deps Dependencies, window fyne.Window) fyne.CanvasObject
 	settingsForm := widget.NewForm(
 		widget.NewFormItem("Scanner IP", ipEntry),
 		widget.NewFormItem("Recordings Path", pathEntry),
-		widget.NewFormItem("Hang-Time", hangLabel),
+		widget.NewFormItem("Recording Wait / Hang-Time (s)", hangEntry),
+		widget.NewFormItem("Auto Clip Minimum Duration (s)", minAutoDurationEntry),
+		widget.NewFormItem("Activity Start Debounce (ms)", activityStartEntry),
+		widget.NewFormItem("Activity End Debounce (ms)", activityEndEntry),
 		widget.NewFormItem("Audio Monitor", monitorDefaultCheck),
 		widget.NewFormItem("Monitor Gain (dB)", monitorGainEntry),
 		widget.NewFormItem("Monitor Output Device", monitorOutputSelect),

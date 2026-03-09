@@ -17,6 +17,7 @@ const (
 	recordTriggerTelemetry = "telemetry"
 	recordTriggerManual    = "manual"
 	recordTriggerMixed     = "mixed"
+	defaultSampleRateHz    = 8000
 )
 
 // Metadata captures persisted recording details.
@@ -44,11 +45,15 @@ type Status struct {
 
 // Config controls recording manager behavior.
 type Config struct {
-	OutputDir     string
-	HangTime      time.Duration
-	Now           func() time.Time
-	WriterFactory func(path string) (PCMWriter, error)
-	OnFinalized   func(Metadata) error
+	OutputDir            string
+	HangTime             time.Duration
+	StartDebounce        time.Duration
+	MinAutoDuration      time.Duration
+	MinNonSilentDuration time.Duration
+	SilenceThreshold     int16
+	Now                  func() time.Time
+	WriterFactory        func(path string) (PCMWriter, error)
+	OnFinalized          func(Metadata) error
 }
 
 // Manager handles activity-driven clip lifecycle.
@@ -58,20 +63,33 @@ type Manager struct {
 	cfg      Config
 	detector *activity.Detector
 
-	writer   PCMWriter
-	path     string
-	started  time.Time
-	lastSeen time.Time
-	status   sds200.RuntimeStatus
-	clipInfo sds200.RuntimeStatus
-	trigger  string
-	manual   bool
-	faulted  error
+	writer                 PCMWriter
+	path                   string
+	started                time.Time
+	lastSeen               time.Time
+	status                 sds200.RuntimeStatus
+	clipInfo               sds200.RuntimeStatus
+	trigger                string
+	manual                 bool
+	autoStartPendingAt     time.Time
+	autoStartPendingStatus sds200.RuntimeStatus
+	totalSamples           uint64
+	nonSilentSamples       uint64
+	faulted                error
 }
 
 func NewManager(cfg Config) *Manager {
 	if cfg.HangTime <= 0 {
 		cfg.HangTime = 10 * time.Second
+	}
+	if cfg.MinAutoDuration < 0 {
+		cfg.MinAutoDuration = 0
+	}
+	if cfg.MinNonSilentDuration < 0 {
+		cfg.MinNonSilentDuration = 0
+	}
+	if cfg.SilenceThreshold <= 0 {
+		cfg.SilenceThreshold = 700
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -96,12 +114,34 @@ func (m *Manager) UpdateTelemetry(status sds200.RuntimeStatus, at time.Time) err
 	}
 	m.status = status
 	active := sds200.IsTransmissionActive(status)
-	res := m.detector.Evaluate(active, at)
-	if res.BecameActive && m.writer == nil {
-		if err := m.begin(at, status, recordTriggerTelemetry); err != nil {
+	if m.writer == nil && !m.manual {
+		if err := m.handleAutoStart(status, active, at); err != nil {
 			return err
 		}
+		return nil
 	}
+	if m.writer != nil && !m.manual {
+		if shouldFinalizeForAvoid(status) {
+			if err := m.finalize(at); err != nil {
+				return err
+			}
+			m.resetDetectorLocked()
+			return nil
+		}
+		if shouldFinalizeForFrequencyChange(m.clipInfo, status) {
+			if err := m.finalize(at); err != nil {
+				return err
+			}
+			m.resetDetectorLocked()
+			if active {
+				if err := m.handleAutoStart(status, active, at); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+	res := m.detector.Evaluate(active, at)
 	if m.writer != nil && active && m.trigger == recordTriggerManual {
 		m.trigger = recordTriggerMixed
 	}
@@ -116,6 +156,73 @@ func (m *Manager) UpdateTelemetry(status sds200.RuntimeStatus, at time.Time) err
 	return nil
 }
 
+func (m *Manager) handleAutoStart(status sds200.RuntimeStatus, active bool, at time.Time) error {
+	if !active {
+		m.clearAutoStartPendingLocked()
+		m.resetDetectorLocked()
+		return nil
+	}
+
+	if m.cfg.StartDebounce <= 0 {
+		if err := m.begin(at, status, recordTriggerTelemetry); err != nil {
+			return err
+		}
+		m.resetDetectorLocked()
+		m.detector.Evaluate(true, at)
+		return nil
+	}
+
+	if m.autoStartPendingAt.IsZero() {
+		m.autoStartPendingAt = at
+		m.autoStartPendingStatus = status
+	}
+	if at.Before(m.autoStartPendingAt.Add(m.cfg.StartDebounce)) {
+		return nil
+	}
+
+	startAt := m.autoStartPendingAt
+	startStatus := m.autoStartPendingStatus
+	if startAt.IsZero() {
+		startAt = at
+		startStatus = status
+	}
+	if err := m.begin(startAt, startStatus, recordTriggerTelemetry); err != nil {
+		return err
+	}
+	m.clearAutoStartPendingLocked()
+	m.resetDetectorLocked()
+	m.detector.Evaluate(true, at)
+	return nil
+}
+
+func (m *Manager) resetDetectorLocked() {
+	m.detector = activity.NewDetector(m.cfg.HangTime)
+}
+
+func (m *Manager) clearAutoStartPendingLocked() {
+	m.autoStartPendingAt = time.Time{}
+	m.autoStartPendingStatus = sds200.RuntimeStatus{}
+}
+
+func shouldFinalizeForAvoid(status sds200.RuntimeStatus) bool {
+	return status.AvoidKnown && status.Avoided
+}
+
+func shouldFinalizeForFrequencyChange(started, current sds200.RuntimeStatus) bool {
+	startFreq := normalizeFrequency(started.Frequency)
+	currentFreq := normalizeFrequency(current.Frequency)
+	if startFreq == "" || currentFreq == "" {
+		return false
+	}
+	return startFreq != currentFreq
+}
+
+func normalizeFrequency(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.TrimSuffix(value, "mhz")
+	return strings.TrimSpace(value)
+}
+
 func (m *Manager) StartManual(status sds200.RuntimeStatus, at time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -126,6 +233,7 @@ func (m *Manager) StartManual(status sds200.RuntimeStatus, at time.Time) error {
 		at = m.cfg.Now()
 	}
 	m.status = status
+	m.clearAutoStartPendingLocked()
 
 	if m.writer == nil {
 		trigger := recordTriggerManual
@@ -182,6 +290,12 @@ func (m *Manager) PushPCM(samples []int16, at time.Time) error {
 		m.faulted = fmt.Errorf("recording write fault: %w", err)
 		return m.faulted
 	}
+	m.totalSamples += uint64(len(samples))
+	for _, sample := range samples {
+		if sampleAbs(sample) >= m.cfg.SilenceThreshold {
+			m.nonSilentSamples++
+		}
+	}
 	m.lastSeen = at
 	return nil
 }
@@ -233,6 +347,24 @@ func (m *Manager) UpdateOutputDir(path string) error {
 	return nil
 }
 
+// UpdateAutoPolicy applies updated auto-recording policy settings.
+// Active clips keep their current detector state; new values apply for future transitions.
+func (m *Manager) UpdateAutoPolicy(hangTime, minAutoDuration time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if hangTime > 0 {
+		m.cfg.HangTime = hangTime
+		if m.writer == nil {
+			m.detector = activity.NewDetector(hangTime)
+		}
+	}
+	if minAutoDuration < 0 {
+		minAutoDuration = 0
+	}
+	m.cfg.MinAutoDuration = minAutoDuration
+}
+
 // Snapshot returns a copy of the recorder runtime status.
 func (m *Manager) Snapshot() Status {
 	m.mu.Lock()
@@ -266,6 +398,7 @@ func (m *Manager) begin(at time.Time, status sds200.RuntimeStatus, trigger strin
 	m.started = at
 	m.lastSeen = at
 	m.clipInfo = status
+	m.clearAutoStartPendingLocked()
 	if strings.TrimSpace(trigger) == "" {
 		trigger = recordTriggerTelemetry
 	}
@@ -275,6 +408,10 @@ func (m *Manager) begin(at time.Time, status sds200.RuntimeStatus, trigger strin
 
 func (m *Manager) finalize(at time.Time) error {
 	if m.writer == nil {
+		return nil
+	}
+	if m.shouldSuppressAuto(at) {
+		m.abortWriter()
 		return nil
 	}
 	size, err := m.writer.Finalize()
@@ -307,6 +444,9 @@ func (m *Manager) finalize(at time.Time) error {
 	m.clipInfo = sds200.RuntimeStatus{}
 	m.trigger = ""
 	m.manual = false
+	m.clearAutoStartPendingLocked()
+	m.totalSamples = 0
+	m.nonSilentSamples = 0
 	if m.cfg.OnFinalized != nil {
 		if err := m.cfg.OnFinalized(meta); err != nil {
 			return fmt.Errorf("on finalized callback: %w", err)
@@ -326,6 +466,44 @@ func (m *Manager) abortWriter() {
 	m.clipInfo = sds200.RuntimeStatus{}
 	m.trigger = ""
 	m.manual = false
+	m.clearAutoStartPendingLocked()
+	m.totalSamples = 0
+	m.nonSilentSamples = 0
+}
+
+func (m *Manager) shouldSuppressAuto(at time.Time) bool {
+	if m.trigger != recordTriggerTelemetry {
+		return false
+	}
+	enabled := m.cfg.MinAutoDuration > 0 || m.cfg.MinNonSilentDuration > 0
+	if !enabled {
+		return false
+	}
+	if at.IsZero() || at.Before(m.started) {
+		at = m.started
+	}
+	if m.cfg.MinAutoDuration > 0 && at.Sub(m.started) < m.cfg.MinAutoDuration {
+		return true
+	}
+	if m.totalSamples == 0 {
+		return true
+	}
+	if m.cfg.MinNonSilentDuration <= 0 {
+		return false
+	}
+	minNonSilentSamples := uint64(m.cfg.MinNonSilentDuration/time.Second) * uint64(defaultSampleRateHz)
+	minNonSilentSamples += uint64((m.cfg.MinNonSilentDuration % time.Second) * defaultSampleRateHz / time.Second)
+	return m.nonSilentSamples < minNonSilentSamples
+}
+
+func sampleAbs(v int16) int16 {
+	if v < 0 {
+		if v == -32768 {
+			return 32767
+		}
+		return -v
+	}
+	return v
 }
 
 func sanitizeSegment(s, fallback string) string {

@@ -2,6 +2,7 @@ package sds200
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -185,6 +186,7 @@ func TestTelemetryStoreUpdateFromGST(t *testing.T) {
 		assert.True(t, updated.Mute)
 		assert.True(t, updated.Connected)
 		assert.False(t, updated.SquelchOpen)
+		assert.False(t, updated.ActivityAt.IsZero())
 	})
 }
 
@@ -197,11 +199,12 @@ func TestTelemetryStoreUpdateFromScannerInfo(t *testing.T) {
 			Mode:    "Scan Mode",
 			VScreen: "conventional_scan",
 			Property: map[string]string{
-				"VOL":  "11",
-				"SQL":  "5",
-				"Sig":  "3",
-				"Mute": "Unmute",
-				"F":    "Off",
+				"VOL":       "11",
+				"SQL":       "5",
+				"Sig":       "3",
+				"Mute":      "Unmute",
+				"P25Status": "P25",
+				"F":         "Off",
 			},
 			Nodes: map[string][]map[string]string{
 				"System":        {{"Name": "County"}},
@@ -217,10 +220,12 @@ func TestTelemetryStoreUpdateFromScannerInfo(t *testing.T) {
 		assert.Equal(t, 11, updated.Volume)
 		assert.True(t, updated.Hold)
 		assert.True(t, updated.SquelchOpen)
+		assert.Equal(t, "P25", updated.P25Status)
 		assert.Equal(t, "CFREQ", updated.HoldTarget.Keyword)
 		assert.Equal(t, "120", updated.HoldTarget.Arg1)
 		assert.True(t, updated.AvoidKnown)
 		assert.False(t, updated.Avoided)
+		assert.False(t, updated.ActivityAt.IsZero())
 	})
 }
 
@@ -390,6 +395,27 @@ func TestIsTransmissionActive(t *testing.T) {
 			name:   "signal_muted",
 			status: RuntimeStatus{Connected: true, Signal: 3, Mute: true},
 			want:   false,
+		},
+		{
+			name: "p25_data_is_inactive",
+			status: RuntimeStatus{
+				Connected:   true,
+				SquelchOpen: true,
+				Signal:      4,
+				P25Status:   "Data",
+			},
+			want: false,
+		},
+		{
+			name: "stale_activity_is_inactive",
+			status: RuntimeStatus{
+				Connected:  true,
+				Signal:     4,
+				Mute:       false,
+				UpdatedAt:  time.Date(2026, 3, 8, 10, 0, 4, 0, time.UTC),
+				ActivityAt: time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC),
+			},
+			want: false,
 		},
 	}
 

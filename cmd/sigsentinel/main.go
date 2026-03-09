@@ -119,9 +119,10 @@ func run(opts cliFlags) error {
 	initialSettings := gui.Settings{}
 	if cfg := runtime.Config(); cfg != nil {
 		initialSettings = gui.Settings{
-			ScannerIP:       cfg.Config.Scanner.IP,
-			RecordingsPath:  cfg.Config.Storage.RecordingsPath,
-			HangTimeSeconds: cfg.Config.Recording.HangTimeSeconds,
+			ScannerIP:              cfg.Config.Scanner.IP,
+			RecordingsPath:         cfg.Config.Storage.RecordingsPath,
+			HangTimeSeconds:        cfg.Config.Recording.HangTimeSeconds,
+			MinAutoDurationSeconds: cfg.Config.Recording.MinAutoDurationSeconds,
 			Activity: gui.ActivitySettings{
 				StartDebounceMS: cfg.Config.Activity.StartDebounceMS,
 				EndDebounceMS:   cfg.Config.Activity.EndDebounceMS,
@@ -303,15 +304,25 @@ func run(opts cliFlags) error {
 			return out, err
 		},
 		SaveSettings: func(settings gui.Settings) error {
+			if settings.HangTimeSeconds < 1 {
+				return errors.New("hang-time must be >= 1 second")
+			}
+			if settings.MinAutoDurationSeconds < 0 {
+				return errors.New("recording minimum auto duration must be >= 0 seconds")
+			}
+			if settings.Activity.StartDebounceMS < 0 {
+				return errors.New("activity start debounce must be >= 0 ms")
+			}
+			if settings.Activity.EndDebounceMS < 0 {
+				return errors.New("activity end debounce must be >= 0 ms")
+			}
 			if err := runtime.UpdateConfig(func(doc *store.Document) error {
 				doc.Config.Scanner.IP = strings.TrimSpace(settings.ScannerIP)
 				doc.Config.Storage.RecordingsPath = strings.TrimSpace(settings.RecordingsPath)
-				if settings.HangTimeChanged {
-					if settings.HangTimeSeconds < 1 {
-						return errors.New("hang-time must be >= 1 second")
-					}
-					doc.Config.Recording.HangTimeSeconds = settings.HangTimeSeconds
-				}
+				doc.Config.Recording.HangTimeSeconds = settings.HangTimeSeconds
+				doc.Config.Recording.MinAutoDurationSeconds = settings.MinAutoDurationSeconds
+				doc.Config.Activity.StartDebounceMS = settings.Activity.StartDebounceMS
+				doc.Config.Activity.EndDebounceMS = settings.Activity.EndDebounceMS
 				doc.Config.AudioMonitor.DefaultEnabled = settings.AudioMonitorDefaultEnabled
 				doc.Config.AudioMonitor.OutputDevice = strings.TrimSpace(settings.AudioMonitorOutputDevice)
 				doc.Config.AudioMonitor.GainDB = settings.AudioMonitorGainDB
@@ -322,6 +333,10 @@ func run(opts cliFlags) error {
 			if err := recorder.UpdateOutputDir(runtime.RecordingsPath()); err != nil {
 				return err
 			}
+			recorder.UpdateAutoPolicy(
+				time.Duration(settings.HangTimeSeconds)*time.Second,
+				time.Duration(settings.MinAutoDurationSeconds)*time.Second,
+			)
 			if err := audioMonitor.SetGainDB(settings.AudioMonitorGainDB); err != nil {
 				return err
 			}
@@ -550,10 +565,14 @@ func startAudioPipeline(ctx context.Context, runtime *Runtime) (*ingest.Session,
 	if doc == nil {
 		return nil, nil, nil, nil, errors.New("runtime config missing")
 	}
+	const recordingStartDebounce = 200 * time.Millisecond
 
 	rec := recording.NewManager(recording.Config{
-		OutputDir: runtime.RecordingsPath(),
-		HangTime:  time.Duration(doc.Config.Recording.HangTimeSeconds) * time.Second,
+		OutputDir:            runtime.RecordingsPath(),
+		HangTime:             time.Duration(doc.Config.Recording.HangTimeSeconds) * time.Second,
+		StartDebounce:        recordingStartDebounce,
+		MinAutoDuration:      time.Duration(doc.Config.Recording.MinAutoDurationSeconds) * time.Second,
+		MinNonSilentDuration: 0,
 		OnFinalized: func(meta recording.Metadata) error {
 			entry := store.RecordingEntry{
 				ID:        meta.ID,

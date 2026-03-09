@@ -39,7 +39,10 @@ type StorageConfig struct {
 }
 
 type RecordingConfig struct {
+	// HangTimeSeconds keeps an auto recording open after activity drops.
 	HangTimeSeconds int `yaml:"hang_time_seconds"`
+	// MinAutoDurationSeconds suppresses telemetry-triggered clips shorter than this duration.
+	MinAutoDurationSeconds int `yaml:"min_auto_duration_seconds"`
 }
 
 type ActivityConfig struct {
@@ -134,6 +137,9 @@ func (d *Document) ApplyDefaults() {
 	if d.Config.Recording.HangTimeSeconds == 0 {
 		d.Config.Recording.HangTimeSeconds = 10
 	}
+	if d.Config.Recording.MinAutoDurationSeconds == 0 {
+		d.Config.Recording.MinAutoDurationSeconds = d.Config.Recording.HangTimeSeconds + 10
+	}
 	if d.Config.Activity.StartDebounceMS == 0 {
 		d.Config.Activity.StartDebounceMS = 150
 	}
@@ -163,6 +169,8 @@ func (d *Document) Validate() error {
 		return errors.New("recordings path is required")
 	} else if d.Config.Recording.HangTimeSeconds < 1 {
 		return errors.New("hang time must be >= 1")
+	} else if d.Config.Recording.MinAutoDurationSeconds < 0 {
+		return errors.New("recording minimum auto duration must be >= 0")
 	} else if d.Config.Activity.StartDebounceMS < 0 {
 		return errors.New("activity start debounce must be >= 0")
 	} else if d.Config.Activity.EndDebounceMS < 0 {

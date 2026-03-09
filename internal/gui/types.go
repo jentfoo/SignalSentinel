@@ -162,11 +162,11 @@ type DeleteReport struct {
 }
 
 type Settings struct {
-	ScannerIP       string
-	RecordingsPath  string
-	HangTimeSeconds int
-	HangTimeChanged bool
-	Activity        ActivitySettings
+	ScannerIP              string
+	RecordingsPath         string
+	HangTimeSeconds        int
+	MinAutoDurationSeconds int
+	Activity               ActivitySettings
 
 	AudioMonitorDefaultEnabled bool
 	AudioMonitorOutputDevice   string

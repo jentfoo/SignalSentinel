@@ -76,7 +76,7 @@ func (c SessionConfig) withDefaults() SessionConfig {
 		c.WriteTimeout = c.ResponseTimeout
 	}
 	if c.PushIntervalMS <= 0 {
-		c.PushIntervalMS = 1000
+		c.PushIntervalMS = 500
 	}
 	if c.HealthCheckInterval <= 0 {
 		c.HealthCheckInterval = 20 * time.Second

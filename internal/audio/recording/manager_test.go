@@ -87,6 +87,29 @@ func TestManagerUpdateTelemetry(t *testing.T) {
 		require.NoError(t, m.UpdateTelemetry(idleStatus(), t0.Add(time.Second)))
 	})
 
+	t.Run("start_debounce_delays_auto_recording_start", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		writer := &testWriter{}
+		m := NewManager(Config{
+			OutputDir:     filepath.Join(t.TempDir(), "clips"),
+			HangTime:      10 * time.Second,
+			StartDebounce: 200 * time.Millisecond,
+			WriterFactory: func(path string) (PCMWriter, error) {
+				return writer, nil
+			},
+		})
+
+		require.NoError(t, m.UpdateTelemetry(activeStatus(), t0))
+		assert.Nil(t, m.writer)
+
+		require.NoError(t, m.UpdateTelemetry(activeStatus(), t0.Add(150*time.Millisecond)))
+		assert.Nil(t, m.writer)
+
+		require.NoError(t, m.UpdateTelemetry(activeStatus(), t0.Add(200*time.Millisecond)))
+		require.NotNil(t, m.writer)
+		assert.Equal(t, t0, m.started)
+	})
+
 	t.Run("finalize_error_aborts_writer", func(t *testing.T) {
 		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
 		writer := &testWriter{finalizeErr: errors.New("disk full")}
@@ -104,6 +127,134 @@ func TestManagerUpdateTelemetry(t *testing.T) {
 		err := m.UpdateTelemetry(idleStatus(), t0.Add(12*time.Second))
 		require.Error(t, err)
 		assert.True(t, writer.aborted)
+	})
+
+	t.Run("frequency_change_splits_auto_recording_immediately", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		var clips []Metadata
+		m := NewManager(Config{
+			OutputDir: filepath.Join(t.TempDir(), "clips"),
+			HangTime:  10 * time.Second,
+			OnFinalized: func(meta Metadata) error {
+				clips = append(clips, meta)
+				return nil
+			},
+		})
+
+		first := sds200.RuntimeStatus{
+			Connected:   true,
+			SquelchOpen: true,
+			Frequency:   "155.2200",
+			System:      "County",
+			Channel:     "Ops 1",
+		}
+		second := sds200.RuntimeStatus{
+			Connected:   true,
+			SquelchOpen: true,
+			Frequency:   "460.0000",
+			System:      "Metro",
+			Channel:     "Dispatch 9",
+		}
+
+		require.NoError(t, m.UpdateTelemetry(first, t0))
+		require.NoError(t, m.PushPCM([]int16{1, 2, 3}, t0.Add(time.Second)))
+		require.NoError(t, m.UpdateTelemetry(second, t0.Add(2*time.Second)))
+
+		require.Len(t, clips, 1)
+		assert.Equal(t, "155.2200", clips[0].Frequency)
+
+		snap := m.Snapshot()
+		assert.True(t, snap.Active)
+		assert.False(t, snap.Manual)
+		assert.Equal(t, t0.Add(2*time.Second), snap.StartedAt)
+		assert.Equal(t, "telemetry", snap.Trigger)
+	})
+
+	t.Run("avoid_stops_auto_recording_immediately", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		var clips []Metadata
+		m := NewManager(Config{
+			OutputDir: filepath.Join(t.TempDir(), "clips"),
+			HangTime:  10 * time.Second,
+			OnFinalized: func(meta Metadata) error {
+				clips = append(clips, meta)
+				return nil
+			},
+		})
+
+		start := sds200.RuntimeStatus{
+			Connected:   true,
+			SquelchOpen: true,
+			Frequency:   "155.2200",
+			System:      "County",
+			Channel:     "Ops 1",
+			AvoidKnown:  true,
+			Avoided:     false,
+		}
+		avoided := start
+		avoided.Avoided = true
+
+		require.NoError(t, m.UpdateTelemetry(start, t0))
+		require.NoError(t, m.PushPCM([]int16{1, 2, 3}, t0.Add(time.Second)))
+		require.NoError(t, m.UpdateTelemetry(avoided, t0.Add(2*time.Second)))
+
+		require.Len(t, clips, 1)
+		assert.Equal(t, "155.2200", clips[0].Frequency)
+		assert.False(t, m.Snapshot().Active)
+	})
+
+	t.Run("suppresses_auto_recording_with_insufficient_non_silent_audio", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		var clips []Metadata
+		m := NewManager(Config{
+			OutputDir:            filepath.Join(t.TempDir(), "clips"),
+			HangTime:             10 * time.Second,
+			MinAutoDuration:      200 * time.Millisecond,
+			MinNonSilentDuration: 300 * time.Millisecond,
+			OnFinalized: func(meta Metadata) error {
+				clips = append(clips, meta)
+				return nil
+			},
+		})
+
+		require.NoError(t, m.UpdateTelemetry(activeStatus(), t0))
+		brief := make([]int16, 800) // 100ms at 8kHz
+		for i := range brief {
+			brief[i] = 1500
+		}
+		require.NoError(t, m.PushPCM(brief, t0.Add(50*time.Millisecond)))
+		require.NoError(t, m.UpdateTelemetry(idleStatus(), t0.Add(150*time.Millisecond)))
+		require.NoError(t, m.Tick(t0.Add(11*time.Second)))
+
+		assert.Empty(t, clips)
+		assert.False(t, m.Snapshot().Active)
+	})
+
+	t.Run("keeps_auto_recording_when_non_silent_audio_threshold_is_met", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		var clips []Metadata
+		m := NewManager(Config{
+			OutputDir:            filepath.Join(t.TempDir(), "clips"),
+			HangTime:             10 * time.Second,
+			MinAutoDuration:      200 * time.Millisecond,
+			MinNonSilentDuration: 300 * time.Millisecond,
+			OnFinalized: func(meta Metadata) error {
+				clips = append(clips, meta)
+				return nil
+			},
+		})
+
+		require.NoError(t, m.UpdateTelemetry(activeStatus(), t0))
+		voiced := make([]int16, 3200) // 400ms at 8kHz
+		for i := range voiced {
+			voiced[i] = 1500
+		}
+		require.NoError(t, m.PushPCM(voiced, t0.Add(100*time.Millisecond)))
+		require.NoError(t, m.UpdateTelemetry(idleStatus(), t0.Add(500*time.Millisecond)))
+		require.NoError(t, m.Tick(t0.Add(11*time.Second)))
+
+		require.Len(t, clips, 1)
+		assert.Equal(t, "telemetry", clips[0].Trigger)
 	})
 }
 
@@ -307,6 +458,60 @@ func TestManagerManualLifecycle(t *testing.T) {
 
 		require.Len(t, clips, 1)
 		assert.Equal(t, "mixed", clips[0].Trigger)
+	})
+
+	t.Run("manual_recording_ignores_avoid_and_frequency_changes", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		m := NewManager(Config{
+			OutputDir: filepath.Join(t.TempDir(), "clips"),
+			HangTime:  10 * time.Second,
+		})
+
+		start := sds200.RuntimeStatus{
+			Connected:   true,
+			SquelchOpen: false,
+			Frequency:   "155.2200",
+			System:      "County",
+			Channel:     "Ops 1",
+			AvoidKnown:  true,
+			Avoided:     false,
+		}
+		changed := sds200.RuntimeStatus{
+			Connected:   true,
+			SquelchOpen: false,
+			Frequency:   "460.0000",
+			System:      "Metro",
+			Channel:     "Dispatch 9",
+			AvoidKnown:  true,
+			Avoided:     true,
+		}
+
+		require.NoError(t, m.StartManual(start, t0))
+		require.NoError(t, m.UpdateTelemetry(changed, t0.Add(2*time.Second)))
+
+		snap := m.Snapshot()
+		assert.True(t, snap.Active)
+		assert.True(t, snap.Manual)
+	})
+
+	t.Run("manual_recording_is_not_suppressed_by_non_silent_threshold", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		var clips []Metadata
+		m := NewManager(Config{
+			OutputDir:            filepath.Join(t.TempDir(), "clips"),
+			MinNonSilentDuration: time.Second,
+			OnFinalized: func(meta Metadata) error {
+				clips = append(clips, meta)
+				return nil
+			},
+		})
+
+		require.NoError(t, m.StartManual(idleStatus(), t0))
+		require.NoError(t, m.PushPCM([]int16{1000, 1000, 1000}, t0.Add(100*time.Millisecond)))
+		require.NoError(t, m.StopManual(t0.Add(200*time.Millisecond)))
+
+		require.Len(t, clips, 1)
+		assert.Equal(t, "manual", clips[0].Trigger)
 	})
 }
 
@@ -533,6 +738,26 @@ func TestIsActive(t *testing.T) {
 		status := sds200.RuntimeStatus{Connected: true, Signal: 1, Mute: false, SquelchOpen: false}
 		require.NoError(t, m.UpdateTelemetry(status, t0))
 		assert.NotNil(t, m.writer)
+	})
+
+	t.Run("p25_data_is_inactive", func(t *testing.T) {
+		t0 := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+		writer := &testWriter{}
+		m := NewManager(Config{
+			OutputDir: filepath.Join(t.TempDir(), "clips"),
+			WriterFactory: func(path string) (PCMWriter, error) {
+				return writer, nil
+			},
+		})
+
+		status := sds200.RuntimeStatus{
+			Connected:   true,
+			Signal:      4,
+			SquelchOpen: true,
+			P25Status:   "Data",
+		}
+		require.NoError(t, m.UpdateTelemetry(status, t0))
+		assert.Nil(t, m.writer)
 	})
 
 	t.Run("disconnected_is_inactive", func(t *testing.T) {

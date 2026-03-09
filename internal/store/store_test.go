@@ -23,6 +23,7 @@ func TestStoreLoad(t *testing.T) {
 		assert.Equal(t, 50536, doc.Config.Scanner.ControlPort)
 		assert.Equal(t, 554, doc.Config.Scanner.RTSPPort)
 		assert.Equal(t, 10, doc.Config.Recording.HangTimeSeconds)
+		assert.Equal(t, 20, doc.Config.Recording.MinAutoDurationSeconds)
 		assert.Equal(t, 150, doc.Config.Activity.StartDebounceMS)
 		assert.Equal(t, 600, doc.Config.Activity.EndDebounceMS)
 		assert.Equal(t, 300, doc.Config.Activity.MinActivityMS)

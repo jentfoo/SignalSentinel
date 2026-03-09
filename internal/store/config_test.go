@@ -89,6 +89,16 @@ func TestDocumentValidate(t *testing.T) {
 		assert.Contains(t, err.Error(), "hang")
 	})
 
+	t.Run("invalid_recording_min_auto_duration", func(t *testing.T) {
+		doc := defaultDocument()
+		doc.Config.Scanner.IP = testScannerIP
+		doc.Config.Recording.MinAutoDurationSeconds = -1
+
+		err := doc.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "minimum auto duration")
+	})
+
 	t.Run("invalid_audio_gain", func(t *testing.T) {
 		doc := defaultDocument()
 		doc.Config.Scanner.IP = testScannerIP
@@ -120,10 +130,12 @@ func TestDocumentApplyDefaults(t *testing.T) {
 		doc := &Document{}
 		doc.Config.Scanner.ControlPort = 12345
 		doc.Config.Recording.HangTimeSeconds = 5
+		doc.Config.Recording.MinAutoDurationSeconds = 42
 		doc.ApplyDefaults()
 
 		assert.Equal(t, 12345, doc.Config.Scanner.ControlPort)
 		assert.Equal(t, 5, doc.Config.Recording.HangTimeSeconds)
+		assert.Equal(t, 42, doc.Config.Recording.MinAutoDurationSeconds)
 	})
 
 	t.Run("fills_zero_values", func(t *testing.T) {
@@ -135,11 +147,30 @@ func TestDocumentApplyDefaults(t *testing.T) {
 		assert.Equal(t, 554, doc.Config.Scanner.RTSPPort)
 		assert.Equal(t, "recordings", doc.Config.Storage.RecordingsPath)
 		assert.Equal(t, 10, doc.Config.Recording.HangTimeSeconds)
+		assert.Equal(t, 20, doc.Config.Recording.MinAutoDurationSeconds)
 		assert.Equal(t, 150, doc.Config.Activity.StartDebounceMS)
 		assert.Equal(t, 600, doc.Config.Activity.EndDebounceMS)
 		assert.Equal(t, 300, doc.Config.Activity.MinActivityMS)
 		assert.InDelta(t, 0.0, doc.Config.AudioMonitor.GainDB, 0.000001)
 		assert.Equal(t, "system-default", doc.Config.AudioMonitor.OutputDevice)
+	})
+
+	t.Run("derives_recording_min_auto_duration_from_hang_time", func(t *testing.T) {
+		doc := &Document{}
+		doc.Config.Recording.HangTimeSeconds = 15
+
+		doc.ApplyDefaults()
+
+		assert.Equal(t, 25, doc.Config.Recording.MinAutoDurationSeconds)
+	})
+
+	t.Run("preserves_non_zero_activity_minimum", func(t *testing.T) {
+		doc := &Document{}
+		doc.Config.Activity.MinActivityMS = 250
+
+		doc.ApplyDefaults()
+
+		assert.Equal(t, 250, doc.Config.Activity.MinActivityMS)
 	})
 }
 

@@ -175,6 +175,7 @@ type RuntimeStatus struct {
 	Talkgroup   string
 	Hold        bool
 	Signal      int
+	P25Status   string
 	SquelchOpen bool
 	Volume      int
 	Squelch     int
@@ -182,6 +183,7 @@ type RuntimeStatus struct {
 	HoldTarget  HoldTarget
 	Avoided     bool
 	AvoidKnown  bool
+	ActivityAt  time.Time
 	UpdatedAt   time.Time
 	LastSource  string
 }
@@ -192,10 +194,24 @@ func IsTransmissionActive(status RuntimeStatus) bool {
 	if !status.Connected {
 		return false
 	}
+	if isActivityTelemetryStale(status) {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(status.P25Status), "Data") {
+		return false
+	}
 	if status.SquelchOpen {
 		return true
 	}
 	return status.Signal > 0 && !status.Mute
+}
+
+func isActivityTelemetryStale(status RuntimeStatus) bool {
+	const maxActivityStaleness = 3 * time.Second
+	if status.ActivityAt.IsZero() || status.UpdatedAt.IsZero() {
+		return false
+	}
+	return status.UpdatedAt.After(status.ActivityAt.Add(maxActivityStaleness))
 }
 
 type HoldTarget struct {
@@ -237,12 +253,14 @@ func (s *TelemetryStore) UpdateFromGST(gst StatusGST) RuntimeStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now()
 	s.status.Connected = true
-	s.status.UpdatedAt = time.Now()
+	s.status.UpdatedAt = now
 	s.status.LastSource = cmdGST
 	s.status.Frequency = strings.TrimSpace(gst.Frequency)
 	s.status.Mute = strings.EqualFold(strings.TrimSpace(gst.Mute), "Mute") || strings.TrimSpace(gst.Mute) == "1"
 	s.status.SquelchOpen = !s.status.Mute
+	s.status.ActivityAt = now
 	return s.status
 }
 
@@ -250,11 +268,12 @@ func (s *TelemetryStore) UpdateFromScannerInfo(info ScannerInfo) RuntimeStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now()
 	s.status.Mode = info.Mode
 	s.status.ViewScreen = info.VScreen
 	s.status.Connected = true
 	s.status.LastSource = cmdPSI
-	s.status.UpdatedAt = time.Now()
+	s.status.UpdatedAt = now
 
 	if v, ok := info.Property["VOL"]; ok {
 		s.status.Volume = parseIntDefault(v, s.status.Volume)
@@ -264,10 +283,16 @@ func (s *TelemetryStore) UpdateFromScannerInfo(info ScannerInfo) RuntimeStatus {
 	}
 	if v, ok := info.Property["Sig"]; ok {
 		s.status.Signal = parseIntDefault(v, s.status.Signal)
+		s.status.ActivityAt = now
 	}
 	if v, ok := info.Property["Mute"]; ok {
 		s.status.Mute = strings.EqualFold(v, "Mute")
 		s.status.SquelchOpen = !s.status.Mute
+		s.status.ActivityAt = now
+	}
+	if v, ok := info.Property["P25Status"]; ok {
+		s.status.P25Status = strings.TrimSpace(v)
+		s.status.ActivityAt = now
 	}
 
 	s.status.Hold = hasHoldState(info.Nodes)

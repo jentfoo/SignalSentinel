@@ -394,7 +394,7 @@ func TestSessionConfigWithDefaults(t *testing.T) {
 		assert.Equal(t, 3, cfg.Retries)
 		assert.Equal(t, 2*time.Second, cfg.ReadTimeout)
 		assert.Equal(t, 2*time.Second, cfg.WriteTimeout)
-		assert.Equal(t, 1000, cfg.PushIntervalMS)
+		assert.Equal(t, 500, cfg.PushIntervalMS)
 		assert.Equal(t, 20*time.Second, cfg.HealthCheckInterval)
 		assert.Equal(t, 3*time.Second, cfg.ReconnectDelay)
 		assert.Equal(t, 5, cfg.MaxReconnectFails)

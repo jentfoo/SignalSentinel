@@ -523,6 +523,23 @@ func orDash(v string) string {
 	return v
 }
 
+func talkgroupOrDash(v string) string {
+	value := strings.TrimSpace(v)
+	if value == "" {
+		return "-"
+	}
+	if strings.Trim(value, "-") == "" {
+		return "-"
+	}
+	if strings.HasPrefix(strings.ToUpper(value), "TGID:") {
+		suffix := strings.TrimSpace(value[len("TGID:"):])
+		if suffix == "" || strings.Trim(suffix, "-") == "" {
+			return "-"
+		}
+	}
+	return value
+}
+
 func formatFrequency(freq string) string {
 	freq = strings.TrimSpace(freq)
 	if freq == "" {

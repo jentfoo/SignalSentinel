@@ -127,7 +127,7 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 	ui.systemLabel.SetText(orDash(scanner.System))
 	ui.deptLabel.SetText(orDash(scanner.Department))
 	ui.channelLabel.SetText(orDash(scanner.Channel))
-	ui.tgidLabel.SetText(orDash(scanner.Talkgroup))
+	ui.tgidLabel.SetText(talkgroupOrDash(scanner.Talkgroup))
 	ui.signalLabel.SetText(strconv.Itoa(scanner.Signal))
 	ui.squelchLabel.SetText(boolWord(scanner.SquelchOpen, "open", "closed"))
 	ui.squelchLvlLabel.SetText(strconv.Itoa(scanner.Squelch))

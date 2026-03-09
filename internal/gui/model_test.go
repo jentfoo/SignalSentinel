@@ -281,6 +281,29 @@ func TestOrDash(t *testing.T) {
 	})
 }
 
+func TestTalkgroupOrDash(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "blank_returns_dash", value: "   ", want: "-"},
+		{name: "all_dashes_returns_dash", value: "---", want: "-"},
+		{name: "tgid_placeholder_returns_dash", value: "TGID: ---", want: "-"},
+		{name: "tgid_value_kept", value: "TGID: 1234", want: "TGID: 1234"},
+		{name: "plain_value_kept", value: "1234", want: "1234"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, talkgroupOrDash(tt.value))
+		})
+	}
+}
+
 func TestFormatFrequency(t *testing.T) {
 	t.Parallel()
 

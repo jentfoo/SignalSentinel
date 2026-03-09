@@ -621,7 +621,6 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 			statusField("Department", deptLabel),
 			statusField("Channel", channelLabel),
 			statusField("Talkgroup", tgidLabel),
-			statusField("Hold", holdStatusLabel),
 		),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Audio", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),

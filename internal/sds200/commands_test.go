@@ -380,7 +380,7 @@ func TestGetSystemQuickKeys(t *testing.T) {
 
 	client, _ := newCommandTestClient(t, func(req string) []string {
 		if readRequestCommand(req) == cmdSQK {
-			return []string{"SQK," + quickKeysPayload("1", "2") + "\r"}
+			return []string{"SQK," + quickKeysPayload() + "\r"}
 		}
 		return nil
 	})
@@ -388,6 +388,8 @@ func TestGetSystemQuickKeys(t *testing.T) {
 	state, err := client.GetSystemQuickKeys(1)
 	require.NoError(t, err)
 	assert.Equal(t, 0, state[0])
+	assert.Equal(t, 1, state[1])
+	assert.Equal(t, 2, state[2])
 }
 
 func TestSetSystemQuickKeys(t *testing.T) {
@@ -409,7 +411,7 @@ func TestGetDepartmentQuickKeys(t *testing.T) {
 
 	client, _ := newCommandTestClient(t, func(req string) []string {
 		if readRequestCommand(req) == cmdDQK {
-			return []string{"DQK," + quickKeysPayload("1", "2") + "\r"}
+			return []string{"DQK," + quickKeysPayload() + "\r"}
 		}
 		return nil
 	})
@@ -417,6 +419,8 @@ func TestGetDepartmentQuickKeys(t *testing.T) {
 	state, err := client.GetDepartmentQuickKeys(1, 2)
 	require.NoError(t, err)
 	assert.Equal(t, 0, state[0])
+	assert.Equal(t, 1, state[1])
+	assert.Equal(t, 2, state[2])
 }
 
 func TestSetDepartmentQuickKeys(t *testing.T) {

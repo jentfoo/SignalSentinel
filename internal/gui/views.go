@@ -54,6 +54,8 @@ type uiViews struct {
 	monitorOutputSelect *widget.Select
 	monitorApplyButton  *widget.Button
 	monitorStatusLabel  *widget.Label
+	listBrowseButton    *widget.Button
+	listResultLabel     *widget.Label
 	expertMenuStatus    *widget.Label
 	expertAnalyze       *widget.Label
 	expertWaterfall     *widget.Label

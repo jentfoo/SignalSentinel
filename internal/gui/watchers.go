@@ -260,6 +260,13 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 	}
 
 	setExpertTabVisible(&ui, state.Expert.Enabled)
+	if ui.listBrowseButton != nil {
+		if !state.Expert.Enabled || !state.Scanner.Connected {
+			ui.listBrowseButton.Disable()
+		} else {
+			ui.listBrowseButton.Enable()
+		}
+	}
 	if ui.expertMenuStatus != nil {
 		ui.expertMenuStatus.SetText(orDash(state.Expert.MenuStatusSummary))
 	}

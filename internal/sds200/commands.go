@@ -243,7 +243,7 @@ func (c *Client) GetSystemQuickKeys(favQK int) (QuickKeyState, error) {
 	if err != nil {
 		return QuickKeyState{}, err
 	}
-	return parseQuickKeys(resp.Fields, 2)
+	return parseQuickKeys(resp.Fields, 0)
 }
 
 func (c *Client) SetSystemQuickKeys(favQK int, state QuickKeyState) error {
@@ -259,7 +259,7 @@ func (c *Client) GetDepartmentQuickKeys(favQK, sysQK int) (QuickKeyState, error)
 	if err != nil {
 		return QuickKeyState{}, err
 	}
-	return parseQuickKeys(resp.Fields, 2)
+	return parseQuickKeys(resp.Fields, 0)
 }
 
 func (c *Client) SetDepartmentQuickKeys(favQK, sysQK int, state QuickKeyState) error {

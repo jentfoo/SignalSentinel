@@ -52,6 +52,7 @@ type SDS200Client interface {
 	SetDateTime(daylightSaving int, t time.Time) error
 	GetLocationRange() (sds200.LocationRange, error)
 	SetLocationRange(lat, lon, rng string) error
+	GetList(listType string, index ...int) (sds200.XMLNode, error)
 	GetChargeStatus() (sds200.ChargeStatus, error)
 	KeepAlive() error
 	PowerOff() error
@@ -501,7 +502,7 @@ func (s *ScannerSession) executeIntent(intent ControlIntent, params ControlParam
 		}
 		return s.resyncAfterScopeChange(client)
 	case IntentSetSystemQuickKeys:
-		if err := validateQuickKeyTag("favorites quick key", params.ScopeFavoritesTag); err != nil {
+		if err := validateFavoritesIndex("favorites index", params.ScopeFavoritesTag); err != nil {
 			return err
 		}
 		values, err := validateQuickKeyValues(params.QuickKeyValues, 100, "system quick keys")
@@ -514,10 +515,10 @@ func (s *ScannerSession) executeIntent(intent ControlIntent, params ControlParam
 		}
 		return s.resyncAfterScopeChange(client)
 	case IntentSetDepartmentQuickKeys:
-		if err := validateQuickKeyTag("favorites quick key", params.ScopeFavoritesTag); err != nil {
+		if err := validateFavoritesIndex("favorites index", params.ScopeFavoritesTag); err != nil {
 			return err
 		}
-		if err := validateQuickKeyTag("system quick key", params.ScopeSystemTag); err != nil {
+		if err := validateQuickKeySlot("system quick key", params.ScopeSystemTag); err != nil {
 			return err
 		}
 		values, err := validateQuickKeyValues(params.QuickKeyValues, 100, "department quick keys")
@@ -731,14 +732,58 @@ func (s *ScannerSession) executeIntent(intent ControlIntent, params ControlParam
 	}
 }
 
+func (s *ScannerSession) ReadScannerList(listType string, index int) ([]gui.ListItem, error) {
+	if s == nil {
+		return nil, errors.New("scanner session unavailable")
+	}
+	listType = strings.TrimSpace(listType)
+	if listType == "" {
+		return nil, errors.New("list type is required")
+	}
+
+	s.mu.RLock()
+	client := s.client
+	s.mu.RUnlock()
+	if client == nil {
+		return nil, errors.New("scanner client unavailable")
+	}
+
+	var node sds200.XMLNode
+	var err error
+	if index >= 0 {
+		node, err = client.GetList(listType, index)
+	} else {
+		node, err = client.GetList(listType)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]gui.ListItem, 0, len(node.Children))
+	for _, child := range node.Children {
+		if strings.EqualFold(child.XMLName.Local, "Footer") {
+			continue
+		}
+		attrs := make(map[string]string, len(child.Attrs))
+		for k, v := range child.Attrs {
+			attrs[k] = v
+		}
+		items = append(items, gui.ListItem{
+			Tag:   child.XMLName.Local,
+			Attrs: attrs,
+		})
+	}
+	return items, nil
+}
+
 func (s *ScannerSession) ReadScanScope(favoritesTag, systemTag int) (gui.ScanScopeSnapshot, error) {
 	if s == nil {
 		return gui.ScanScopeSnapshot{}, errors.New("scanner session unavailable")
 	}
-	if err := validateQuickKeyTag("favorites quick key", favoritesTag); err != nil {
+	if err := validateFavoritesIndex("favorites index", favoritesTag); err != nil {
 		return gui.ScanScopeSnapshot{}, err
 	}
-	if err := validateQuickKeyTag("system quick key", systemTag); err != nil {
+	if err := validateQuickKeySlot("system quick key", systemTag); err != nil {
 		return gui.ScanScopeSnapshot{}, err
 	}
 
@@ -753,13 +798,15 @@ func (s *ScannerSession) ReadScanScope(favoritesTag, systemTag int) (gui.ScanSco
 	if err != nil {
 		return gui.ScanScopeSnapshot{}, err
 	}
-	systemState, err := client.GetSystemQuickKeys(favoritesTag)
-	if err != nil {
-		return gui.ScanScopeSnapshot{}, err
+	// SQK/DQK may fail for special favorites lists (e.g. Full Database) that
+	// use sentinel index values. Treat failures as empty quick key states.
+	var systemState sds200.QuickKeyState
+	if sqk, sqkErr := client.GetSystemQuickKeys(favoritesTag); sqkErr == nil {
+		systemState = sqk
 	}
-	departmentState, err := client.GetDepartmentQuickKeys(favoritesTag, systemTag)
-	if err != nil {
-		return gui.ScanScopeSnapshot{}, err
+	var departmentState sds200.QuickKeyState
+	if dqk, dqkErr := client.GetDepartmentQuickKeys(favoritesTag, systemTag); dqkErr == nil {
+		departmentState = dqk
 	}
 	serviceTypes, err := client.GetServiceTypes()
 	if err != nil {
@@ -835,7 +882,14 @@ func applyLocationToExpert(expert *ExpertRuntimeState, loc sds200.LocationRange)
 	)
 }
 
-func validateQuickKeyTag(name string, value int) error {
+func validateFavoritesIndex(name string, value int) error {
+	if value < 0 {
+		return fmt.Errorf("%s must be >= 0 (got %d)", name, value)
+	}
+	return nil
+}
+
+func validateQuickKeySlot(name string, value int) error {
 	if value < 0 || value > 99 {
 		return fmt.Errorf("%s must be in range 0-99 (got %d)", name, value)
 	}

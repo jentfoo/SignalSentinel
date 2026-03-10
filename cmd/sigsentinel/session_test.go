@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,9 @@ type fakeSDS200Client struct {
 	keepAliveErr      error
 	powerOffErr       error
 	closeErr          error
+
+	getListErr  error
+	getListNode sds200.XMLNode
 
 	telemetrySnapshot   sds200.RuntimeStatus
 	scannerInfo         sds200.ScannerInfo
@@ -522,6 +526,12 @@ func (f *fakeSDS200Client) SetLocationRange(lat, lon, rng string) error {
 	err := f.setLCRErr
 	f.mu.Unlock()
 	return err
+}
+
+func (f *fakeSDS200Client) GetList(listType string, index ...int) (sds200.XMLNode, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.getListNode, f.getListErr
 }
 
 func (f *fakeSDS200Client) GetChargeStatus() (sds200.ChargeStatus, error) {
@@ -1309,7 +1319,7 @@ func TestScannerSessionReadScanScope(t *testing.T) {
 
 		_, err := session.ReadScanScope(-1, 0)
 		require.Error(t, err)
-		assert.Equal(t, "favorites quick key must be in range 0-99 (got -1)", err.Error())
+		assert.Equal(t, "favorites index must be >= 0 (got -1)", err.Error())
 	})
 
 	t.Run("rejects_nil_session", func(t *testing.T) {
@@ -1350,6 +1360,86 @@ func TestScannerSessionReadScanScope(t *testing.T) {
 
 		close(release)
 		requireSignal(t, done)
+	})
+}
+
+func TestScannerSessionReadScannerList(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns_list_items", func(t *testing.T) {
+		client := &fakeSDS200Client{
+			getListNode: sds200.XMLNode{
+				Children: []sds200.XMLNode{
+					{
+						XMLName: xml.Name{Local: "FL"},
+						Attrs:   map[string]string{"Index": "0", "Name": "Favorites 1", "Monitor": "On"},
+					},
+					{
+						XMLName: xml.Name{Local: "FL"},
+						Attrs:   map[string]string{"Index": "1", "Name": "Favorites 2", "Monitor": "Off"},
+					},
+					{
+						XMLName: xml.Name{Local: "Footer"},
+						Attrs:   map[string]string{"No": "1", "EOT": "1"},
+					},
+				},
+			},
+		}
+		session := &ScannerSession{client: client}
+
+		items, err := session.ReadScannerList("FL", -1)
+		require.NoError(t, err)
+		require.Len(t, items, 2)
+		assert.Equal(t, "FL", items[0].Tag)
+		assert.Equal(t, "0", items[0].Attrs["Index"])
+		assert.Equal(t, "Favorites 1", items[0].Attrs["Name"])
+		assert.Equal(t, "On", items[0].Attrs["Monitor"])
+		assert.Equal(t, "1", items[1].Attrs["Index"])
+		assert.Equal(t, "Favorites 2", items[1].Attrs["Name"])
+	})
+
+	t.Run("filters_footer_nodes", func(t *testing.T) {
+		client := &fakeSDS200Client{
+			getListNode: sds200.XMLNode{
+				Children: []sds200.XMLNode{
+					{
+						XMLName: xml.Name{Local: "SYS"},
+						Attrs:   map[string]string{"Index": "0", "Name": "County"},
+					},
+					{
+						XMLName: xml.Name{Local: "footer"},
+						Attrs:   map[string]string{"No": "1", "EOT": "1"},
+					},
+				},
+			},
+		}
+		session := &ScannerSession{client: client}
+
+		items, err := session.ReadScannerList("SYS", 0)
+		require.NoError(t, err)
+		require.Len(t, items, 1)
+		assert.Equal(t, "SYS", items[0].Tag)
+	})
+
+	t.Run("empty_list_type_rejected", func(t *testing.T) {
+		session := &ScannerSession{client: &fakeSDS200Client{}}
+		_, err := session.ReadScannerList("", -1)
+		require.Error(t, err)
+		assert.Equal(t, "list type is required", err.Error())
+	})
+
+	t.Run("nil_session_rejected", func(t *testing.T) {
+		var session *ScannerSession
+		_, err := session.ReadScannerList("FL", -1)
+		require.Error(t, err)
+		assert.Equal(t, "scanner session unavailable", err.Error())
+	})
+
+	t.Run("nil_client_rejected", func(t *testing.T) {
+		session := &ScannerSession{}
+		_, err := session.ReadScannerList("FL", -1)
+		require.Error(t, err)
+		assert.Equal(t, "scanner client unavailable", err.Error())
 	})
 }
 

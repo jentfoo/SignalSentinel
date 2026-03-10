@@ -188,6 +188,11 @@ type ScanScopeSnapshot struct {
 	ServiceTypes        []int
 }
 
+type ListItem struct {
+	Tag   string
+	Attrs map[string]string
+}
+
 type ScanProfile struct {
 	Name                string
 	FavoritesQuickKeys  []int
@@ -234,6 +239,7 @@ type Dependencies struct {
 	InitialSettings          Settings
 	SubscribeState           func(context.Context) <-chan RuntimeState
 	ExecuteControl           func(ControlRequest) ControlResult
+	LoadScannerList          func(listType string, index int) ([]ListItem, error)
 	LoadScanScope            func(favoritesTag, systemTag int) (ScanScopeSnapshot, error)
 	LoadScanProfiles         func() ([]ScanProfile, error)
 	SaveScanProfile          func(ScanProfile) error

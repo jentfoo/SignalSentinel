@@ -104,6 +104,30 @@ func binaryStateToIndexes(values []int) []int {
 	return out
 }
 
+// indexesToQKState converts "on" indexes to quick key state values.
+// Quick key state uses 0=doesn't exist, 1=disabled, 2=enabled.
+// Positions listed as "on" are set to 2 (enabled), others remain 0.
+func indexesToQKState(indexes []int, length int) []int {
+	out := make([]int, length)
+	for _, idx := range indexes {
+		if idx >= 0 && idx < length {
+			out[idx] = 2
+		}
+	}
+	return out
+}
+
+// qkStateToEnabledIndexes extracts indexes where quick key state is 2 (enabled).
+func qkStateToEnabledIndexes(values []int) []int {
+	out := make([]int, 0, len(values))
+	for i, value := range values {
+		if value == 2 {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
 func allEnabledState(length int) []int {
 	out := make([]int, length)
 	for i := range out {

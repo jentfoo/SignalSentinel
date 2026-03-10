@@ -123,6 +123,10 @@ func (r *Runtime) ExecuteControl(intent ControlIntent, params ControlParams) err
 	return r.session.ExecuteControl(intent, params)
 }
 
+func (r *Runtime) ReadScannerList(listType string, index int) ([]gui.ListItem, error) {
+	return r.session.ReadScannerList(listType, index)
+}
+
 func (r *Runtime) ReadScanScope(favoritesTag, systemTag int) (gui.ScanScopeSnapshot, error) {
 	return r.session.ReadScanScope(favoritesTag, systemTag)
 }
@@ -225,10 +229,10 @@ func (r *Runtime) ApplyScanProfile(name string, scope ProfileScopeSelector) erro
 	if r == nil || r.session == nil {
 		return errors.New("runtime session unavailable")
 	}
-	if err := validateQuickKeyTag("favorites quick key", scope.FavoritesTag); err != nil {
+	if err := validateFavoritesIndex("favorites index", scope.FavoritesTag); err != nil {
 		return err
 	}
-	if err := validateQuickKeyTag("system quick key", scope.SystemTag); err != nil {
+	if err := validateQuickKeySlot("system quick key", scope.SystemTag); err != nil {
 		return err
 	}
 	profile, err := r.findScanProfile(name)
@@ -567,7 +571,7 @@ func normalizeScanProfile(profile store.ScanProfile) (store.ScanProfile, error) 
 			if err != nil {
 				return store.ScanProfile{}, fmt.Errorf("invalid system quick key profile key %q", cleanKey)
 			}
-			if err := validateQuickKeyTag("system quick key profile key", parsed); err != nil {
+			if err := validateFavoritesIndex("system quick key profile key", parsed); err != nil {
 				return store.ScanProfile{}, err
 			}
 			normalized, normErr := validateBinaryValues(values, 100, "system quick keys")
@@ -596,10 +600,10 @@ func normalizeScanProfile(profile store.ScanProfile) (store.ScanProfile, error) 
 			if err != nil {
 				return store.ScanProfile{}, fmt.Errorf("invalid department quick key profile key %q", cleanKey)
 			}
-			if err := validateQuickKeyTag("department quick key profile favorites tag", favTag); err != nil {
+			if err := validateFavoritesIndex("department quick key profile favorites tag", favTag); err != nil {
 				return store.ScanProfile{}, err
 			}
-			if err := validateQuickKeyTag("department quick key profile system tag", sysTag); err != nil {
+			if err := validateQuickKeySlot("department quick key profile system tag", sysTag); err != nil {
 				return store.ScanProfile{}, err
 			}
 			normalized, normErr := validateBinaryValues(values, 100, "department quick keys")

@@ -184,6 +184,9 @@ func run(opts cliFlags) error {
 		ExecuteControl: func(request gui.ControlRequest) gui.ControlResult {
 			return executeGUIControl(runtime, request)
 		},
+		LoadScannerList: func(listType string, index int) ([]gui.ListItem, error) {
+			return runtime.ReadScannerList(listType, index)
+		},
 		LoadScanScope: func(favoritesTag, systemTag int) (gui.ScanScopeSnapshot, error) {
 			return runtime.ReadScanScope(favoritesTag, systemTag)
 		},

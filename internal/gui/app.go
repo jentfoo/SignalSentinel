@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -764,10 +765,19 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 	stagedDQK := make([]int, 100)
 	stagedSVC := allEnabledState(47)
 	lastLoadedSVC := copyInts(stagedSVC)
-	fqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedFQK)))
-	sqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSQK)))
-	dqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedDQK)))
+	fqkEntry.SetText(encodeIndexList(qkStateToEnabledIndexes(stagedFQK)))
+	sqkEntry.SetText(encodeIndexList(qkStateToEnabledIndexes(stagedSQK)))
+	dqkEntry.SetText(encodeIndexList(qkStateToEnabledIndexes(stagedDQK)))
 	svcEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSVC)))
+
+	// Scanner database browser state and widgets
+	favNameByQK := make(map[int]string)
+	sysNameByQK := make(map[int]string)
+	favOptionIndex := make(map[string]int)
+	sysOptionQK := make(map[string]int)
+	favListSelect := widget.NewSelect([]string{}, nil)
+	sysListSelect := widget.NewSelect([]string{}, nil)
+	refreshListsButton := widget.NewButton("Refresh Lists", nil)
 
 	activeScopeEntry := func() *widget.Entry {
 		switch scopeTargetSelect.Selected {
@@ -793,7 +803,31 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 			return
 		}
 		filtered := filterIndexes(indexes, filterEntry.Text)
-		previewLabel.SetText(fmt.Sprintf("staged %s: %d selected (%s)", scopeTargetSelect.Selected, len(indexes), encodeIndexList(filtered)))
+		base := fmt.Sprintf("staged %s: %d selected (%s)", scopeTargetSelect.Selected, len(indexes), encodeIndexList(filtered))
+
+		var nameMap map[int]string
+		switch scopeTargetSelect.Selected {
+		case "Favorites":
+			nameMap = favNameByQK
+		case "Systems":
+			nameMap = sysNameByQK
+		}
+		if len(nameMap) > 0 && len(filtered) > 0 {
+			names := make([]string, 0, len(filtered))
+			for _, idx := range filtered {
+				if name, ok := nameMap[idx]; ok {
+					names = append(names, fmt.Sprintf("%d=%s", idx, name))
+				}
+			}
+			if len(names) > 0 {
+				limit := 8
+				if len(names) > limit {
+					names = append(names[:limit], "...")
+				}
+				base += "\n" + strings.Join(names, ", ")
+			}
+		}
+		previewLabel.SetText(base)
 	}
 	filterEntry.OnChanged = func(_ string) {
 		refreshScopePreview()
@@ -809,8 +843,15 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 		}
 		return indexesToBinaryState(indexes, length), nil
 	}
+	parseQKState := func(name string, entry *widget.Entry, length int) ([]int, error) {
+		indexes, err := parseIndexList(entry.Text, length-1)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		return indexesToQKState(indexes, length), nil
+	}
 	loadScopeContext := func() (int, int, error) {
-		fav, err := parseIntEntry("Scope favorites quick key", scopeFavEntry)
+		fav, err := parseIntEntry("Scope favorites index", scopeFavEntry)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -818,17 +859,17 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 		if err != nil {
 			return 0, 0, err
 		}
-		if fav < 0 || fav > 99 {
-			return 0, 0, errors.New("scope favorites quick key must be in range 0-99")
+		if fav < 0 {
+			return 0, 0, errors.New("scope favorites index must be >= 0")
 		}
 		if sys < 0 || sys > 99 {
-			return 0, 0, errors.New("scope system quick key must be in range 0-99")
+			return 0, 0, fmt.Errorf("scope system quick key must be in range 0-99 (got %d)", sys)
 		}
 		return fav, sys, nil
 	}
 
 	applyFQKButton.OnTapped = func() {
-		state, err := parseScopeState("FQK", fqkEntry, 99, 100)
+		state, err := parseQKState("FQK", fqkEntry, 100)
 		if err != nil {
 			dialog.ShowError(err, window)
 			return
@@ -846,7 +887,7 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 			dialog.ShowError(err, window)
 			return
 		}
-		state, err := parseScopeState("SQK", sqkEntry, 99, 100)
+		state, err := parseQKState("SQK", sqkEntry, 100)
 		if err != nil {
 			dialog.ShowError(err, window)
 			return
@@ -865,7 +906,7 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 			dialog.ShowError(err, window)
 			return
 		}
-		state, err := parseScopeState("DQK", dqkEntry, 99, 100)
+		state, err := parseQKState("DQK", dqkEntry, 100)
 		if err != nil {
 			dialog.ShowError(err, window)
 			return
@@ -945,9 +986,9 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 					stagedDQK = copyInts(scope.DepartmentQuickKeys)
 					stagedSVC = copyInts(scope.ServiceTypes)
 					lastLoadedSVC = copyInts(scope.ServiceTypes)
-					fqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedFQK)))
-					sqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSQK)))
-					dqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedDQK)))
+					fqkEntry.SetText(encodeIndexList(qkStateToEnabledIndexes(stagedFQK)))
+					sqkEntry.SetText(encodeIndexList(qkStateToEnabledIndexes(stagedSQK)))
+					dqkEntry.SetText(encodeIndexList(qkStateToEnabledIndexes(stagedDQK)))
 					svcEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSVC)))
 					refreshScopePreview()
 				})
@@ -959,6 +1000,100 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 		loadScopeState(false)
 	} else {
 		loadScopeButton.Disable()
+	}
+
+	// Scanner database list browser: cascading favorites → systems
+	populateFavSelect := func(items []ListItem) {
+		favNameByQK = make(map[int]string, len(items))
+		favOptionIndex = make(map[string]int, len(items))
+		options := make([]string, 0, len(items))
+		for _, item := range items {
+			opt := formatListSelectOption(item)
+			options = append(options, opt)
+			if idx, err := strconv.Atoi(item.Attrs["Index"]); err == nil {
+				favOptionIndex[opt] = idx
+			}
+			if qk, err := strconv.Atoi(item.Attrs["Q_Key"]); err == nil && item.Attrs["Name"] != "" {
+				favNameByQK[qk] = item.Attrs["Name"]
+			}
+		}
+		favListSelect.Options = options
+		favListSelect.Refresh()
+	}
+	populateSysSelect := func(items []ListItem) {
+		sysNameByQK = make(map[int]string, len(items))
+		sysOptionQK = make(map[string]int, len(items))
+		options := make([]string, 0, len(items))
+		for _, item := range items {
+			opt := formatListSelectOption(item)
+			options = append(options, opt)
+			if qk, err := strconv.Atoi(item.Attrs["Q_Key"]); err == nil {
+				sysOptionQK[opt] = qk
+				if item.Attrs["Name"] != "" {
+					sysNameByQK[qk] = item.Attrs["Name"]
+				}
+			}
+		}
+		sysListSelect.Options = options
+		sysListSelect.Refresh()
+	}
+	loadSysForFav := func(flIndex int) {
+		if deps.LoadScannerList == nil {
+			return
+		}
+		go func(idx int) {
+			items, err := deps.LoadScannerList("SYS", idx)
+			fyne.Do(func() {
+				if err != nil {
+					sysListSelect.Options = nil
+					sysListSelect.SetSelected("")
+					sysListSelect.Refresh()
+					return
+				}
+				populateSysSelect(items)
+				if len(sysListSelect.Options) > 0 {
+					sysListSelect.SetSelected(sysListSelect.Options[0])
+				}
+			})
+		}(flIndex)
+	}
+	favListSelect.OnChanged = func(selected string) {
+		idx, ok := favOptionIndex[selected]
+		if !ok {
+			return
+		}
+		scopeFavEntry.SetText(strconv.Itoa(idx))
+		loadSysForFav(idx)
+		refreshScopePreview()
+	}
+	sysListSelect.OnChanged = func(selected string) {
+		if qk, ok := sysOptionQK[selected]; ok {
+			scopeSysEntry.SetText(strconv.Itoa(qk))
+		}
+		refreshScopePreview()
+	}
+	loadFavLists := func() {
+		if deps.LoadScannerList == nil {
+			return
+		}
+		go func() {
+			items, err := deps.LoadScannerList("FL", -1)
+			fyne.Do(func() {
+				if err != nil {
+					return
+				}
+				populateFavSelect(items)
+				if len(favListSelect.Options) > 0 {
+					favListSelect.SetSelected(favListSelect.Options[0])
+				}
+			})
+		}()
+	}
+	refreshListsButton.OnTapped = loadFavLists
+	if deps.LoadScannerList != nil {
+		loadFavLists()
+	} else {
+		refreshListsButton.Disable()
 	}
 
 	refreshProfiles := func() {
@@ -1009,17 +1144,17 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 				dialog.ShowError(err, window)
 				return
 			}
-			fqkState, err := parseScopeState("FQK", fqkEntry, 99, 100)
+			fqkState, err := parseQKState("FQK", fqkEntry, 100)
 			if err != nil {
 				dialog.ShowError(err, window)
 				return
 			}
-			sqkState, err := parseScopeState("SQK", sqkEntry, 99, 100)
+			sqkState, err := parseQKState("SQK", sqkEntry, 100)
 			if err != nil {
 				dialog.ShowError(err, window)
 				return
 			}
-			dqkState, err := parseScopeState("DQK", dqkEntry, 99, 100)
+			dqkState, err := parseQKState("DQK", dqkEntry, 100)
 			if err != nil {
 				dialog.ShowError(err, window)
 				return
@@ -1122,9 +1257,9 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 							break
 						}
 					}
-					fqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedFQK)))
-					sqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSQK)))
-					dqkEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedDQK)))
+					fqkEntry.SetText(encodeIndexList(qkStateToEnabledIndexes(stagedFQK)))
+					sqkEntry.SetText(encodeIndexList(qkStateToEnabledIndexes(stagedSQK)))
+					dqkEntry.SetText(encodeIndexList(qkStateToEnabledIndexes(stagedDQK)))
 					svcEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSVC)))
 					refreshScopePreview()
 					return
@@ -1179,19 +1314,28 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 	refreshScopePreview()
 
 	return container.NewVBox(
-		widget.NewLabel("Scan Scope Control"),
+		widget.NewLabel("Scanner Database Browser"),
 		container.NewHBox(
-			widget.NewLabel("Fav QK"),
-			container.NewGridWrap(fyne.NewSize(80, scopeFavEntry.MinSize().Height), scopeFavEntry),
-			widget.NewLabel("Sys QK"),
+			widget.NewLabel("Favorites List"),
+			container.NewGridWrap(fyne.NewSize(280, favListSelect.MinSize().Height), favListSelect),
+			widget.NewLabel("System"),
+			container.NewGridWrap(fyne.NewSize(280, sysListSelect.MinSize().Height), sysListSelect),
+			refreshListsButton,
+		),
+		widget.NewSeparator(),
+		widget.NewLabel("Quick Key Scope"),
+		container.NewHBox(
+			widget.NewLabel("Fav List Index"),
+			container.NewGridWrap(fyne.NewSize(120, scopeFavEntry.MinSize().Height), scopeFavEntry),
+			widget.NewLabel("System QK Slot"),
 			container.NewGridWrap(fyne.NewSize(80, scopeSysEntry.MinSize().Height), scopeSysEntry),
 			loadScopeButton,
 		),
 		widget.NewForm(
-			widget.NewFormItem("Favorites Quick Keys \u2014 On Indexes (0-99)", fqkEntry),
-			widget.NewFormItem("System Quick Keys \u2014 On Indexes (0-99)", sqkEntry),
-			widget.NewFormItem("Department Quick Keys \u2014 On Indexes (0-99)", dqkEntry),
-			widget.NewFormItem("Service Types \u2014 On Indexes (0-46)", svcEntry),
+			widget.NewFormItem("Enabled Favorites Lists (0-99)", fqkEntry),
+			widget.NewFormItem("Enabled Systems in Fav List (0-99)", sqkEntry),
+			widget.NewFormItem("Enabled Departments in System (0-99)", dqkEntry),
+			widget.NewFormItem("Enabled Service Types (0-46)", svcEntry),
 		),
 		container.NewHBox(applyFQKButton, applySQKButton, applyDQKButton, applySVCButton),
 		container.NewHBox(scopeTargetSelect, filterField, selectAllButton, selectNoneButton),
@@ -1410,6 +1554,56 @@ func buildExpertPanel(model *uiModel, deps Dependencies, window fyne.Window, run
 		}, window)
 	}
 
+	listTypeSelect := widget.NewSelect([]string{
+		"FL", "SYS", "DEPT", "SITE", "CFREQ", "TGID", "SFREQ",
+		"AFREQ", "ATGID", "FTO", "CS_BANK", "UREC", "IREC_FILE",
+		"UREC_FILE", "TRN_DISCOV", "CNV_DISCOV",
+	}, nil)
+	listTypeSelect.SetSelected("FL")
+	listIndexEntry := widget.NewEntry()
+	listIndexEntry.SetPlaceHolder("Index (optional)")
+	listResultLabel := widget.NewLabel("-")
+	listResultLabel.Wrapping = fyne.TextWrapWord
+	browseButton := widget.NewButton("Browse", nil)
+	browseButton.OnTapped = func() {
+		listType := listTypeSelect.Selected
+		if listType == "" {
+			dialog.ShowError(errors.New("select a list type"), window)
+			return
+		}
+		index := -1
+		if text := strings.TrimSpace(listIndexEntry.Text); text != "" {
+			v, err := strconv.Atoi(text)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("invalid index: %s", text), window)
+				return
+			}
+			index = v
+		}
+		if deps.LoadScannerList == nil {
+			listResultLabel.SetText("list browsing unavailable")
+			return
+		}
+		browseButton.Disable()
+		go func(lt string, idx int) {
+			items, err := deps.LoadScannerList(lt, idx)
+			fyne.Do(func() {
+				browseButton.Enable()
+				if err != nil {
+					dialog.ShowError(err, window)
+					return
+				}
+				if len(items) == 0 {
+					listResultLabel.SetText("(empty)")
+					return
+				}
+				listResultLabel.SetText(formatListItems(items))
+			})
+		}(listType, index)
+	}
+	views.listBrowseButton = browseButton
+	views.listResultLabel = listResultLabel
+
 	views.expertMenuStatus = menuStatusLabel
 	views.expertAnalyze = analyzeLabel
 	views.expertWaterfall = waterfallLabel
@@ -1443,6 +1637,16 @@ func buildExpertPanel(model *uiModel, deps Dependencies, window fyne.Window, run
 	views.powerOffButton = powerOffButton
 
 	return container.NewVBox(
+		widget.NewCard("List Browser", "", container.NewVBox(
+			container.NewHBox(
+				widget.NewLabel("Type"),
+				container.NewGridWrap(fyne.NewSize(140, listTypeSelect.MinSize().Height), listTypeSelect),
+				widget.NewLabel("Index"),
+				container.NewGridWrap(fyne.NewSize(100, listIndexEntry.MinSize().Height), listIndexEntry),
+				browseButton,
+			),
+			widget.NewForm(widget.NewFormItem("Result", listResultLabel)),
+		)),
 		widget.NewCard("Menu Operations", "", container.NewVBox(
 			container.NewHBox(
 				widget.NewLabel("Menu ID"),
@@ -1553,6 +1757,57 @@ func parseDateTimeInput(value string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, errors.New("date/time must be RFC3339 or YYYY-MM-DD HH:MM:SS")
+}
+
+func formatListSelectOption(item ListItem) string {
+	name := item.Attrs["Name"]
+	if name == "" {
+		name = item.Tag
+	}
+	qk := item.Attrs["Q_Key"]
+	idx := item.Attrs["Index"]
+	switch {
+	case qk != "" && qk != "None" && idx != "":
+		return fmt.Sprintf("%s (QK %s, idx %s)", name, qk, idx)
+	case qk != "" && qk != "None":
+		return fmt.Sprintf("%s (QK %s)", name, qk)
+	case idx != "":
+		return fmt.Sprintf("%s (idx %s)", name, idx)
+	default:
+		return name
+	}
+}
+
+func formatListItems(items []ListItem) string {
+	var b strings.Builder
+	for i, item := range items {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		idx := item.Attrs["Index"]
+		name := item.Attrs["Name"]
+		if idx != "" && name != "" {
+			fmt.Fprintf(&b, "[%s] %s", idx, name)
+		} else if name != "" {
+			b.WriteString(name)
+		} else if idx != "" {
+			fmt.Fprintf(&b, "[%s] %s", idx, item.Tag)
+		} else {
+			b.WriteString(item.Tag)
+		}
+		extras := make([]string, 0)
+		for k, v := range item.Attrs {
+			if k == "Index" || k == "Name" {
+				continue
+			}
+			extras = append(extras, k+"="+v)
+		}
+		if len(extras) > 0 {
+			sort.Strings(extras)
+			fmt.Fprintf(&b, "  (%s)", strings.Join(extras, ", "))
+		}
+	}
+	return b.String()
 }
 
 func buildActivityLists(model *uiModel) (*widget.List, *widget.List) {

@@ -488,6 +488,22 @@ Response:  JPM,OK\r
 
 ### 4.6 Quick Key Commands
 
+Quick Key status values (S0-S99):
+- `0` -- does not exist
+- `1` -- exists and is **disabled**
+- `2` -- exists and is **enabled**
+
+If the controller sends `0` for a non-existent key, the scanner ignores it.
+
+> **Implementation note (SDS200 V2.00):** The Uniden V2.00 spec documents SQK and
+> DQK GET responses as echoing their request parameters before the S0-S99 payload.
+> In practice the scanner does **not** echo parameters — the response body starts
+> immediately with S0. The corrected formats are shown below.
+>
+> SQK and DQK accept the favorites list `Index` from GLT,FL as `FAV_INDEX`
+> (not the Q_Key slot). The `SYS_QK` parameter for DQK is the system quick key
+> slot position (0-99).
+
 **FQK** -- Get/Set Favorites List Quick Keys
 
 ```
@@ -501,29 +517,22 @@ Set:   FQK,[S0],[S1],...,[S99]\r
 **SQK** -- Get/Set System Quick Keys
 
 ```
-Get:   SQK,[FAV_QK]\r
-       → SQK,[FAV_QK],[SYS_QK],[S0],[S1],...,[S99]\r
+Get:   SQK,[FAV_INDEX]\r
+       → SQK,[S0],[S1],...,[S99]\r
 
-Set:   SQK,[FAV_QK],[S0],[S1],...,[S99]\r
+Set:   SQK,[FAV_INDEX],[S0],[S1],...,[S99]\r
        → SQK,OK\r
 ```
 
 **DQK** -- Get/Set Department Quick Keys
 
 ```
-Get:   DQK,[FAV_QK],[SYS_QK]\r
-       → DQK,[FAV_QK],[SYS_QK],[S0],[S1],...,[S99]\r
+Get:   DQK,[FAV_INDEX],[SYS_QK]\r
+       → DQK,[S0],[S1],...,[S99]\r
 
-Set:   DQK,[FAV_QK],[SYS_QK],[S0],[S1],...,[S99]\r
+Set:   DQK,[FAV_INDEX],[SYS_QK],[S0],[S1],...,[S99]\r
        → DQK,OK\r
 ```
-
-Quick Key status values (S0-S99):
-- `0` -- does not exist
-- `1` -- exists and is **disabled**
-- `2` -- exists and is **enabled**
-
-If the controller sends `0` for a non-existent key, the scanner ignores it.
 
 ### 4.7 Hold & Avoid Commands
 
@@ -655,6 +664,13 @@ GLT returns database list contents as multi-packet XML.
 | 15 | TRN_DISCOV | Name, Delay, Logging, Duration, CompareDB, SystemName, SystemType, SiteName, TimeOutTimer, AutoStore |
 | 16 | CNV_DISCOV | Name, Lower, Upper, Mod, Step, Delay, Logging, CompareDB, Duration, TimeOutTimer, AutoStore |
 
+GLT,FL includes special entries with large sentinel Index values:
+- `Index="4294967295"` (0xFFFFFFFF) — "Full Database"
+- `Index="4261412864"` — "Search with Scan"
+
+User-created favorites lists use small sequential Index values (0, 2, 4, ...).
+The `Q_Key` attribute is `"None"` when no quick key is assigned.
+
 **Example GLT,FL response:**
 
 ```
@@ -662,9 +678,9 @@ GLT,FL\r
 GLT,<XML>,\r
 <?xml version="1.0" encoding="utf-8"?>\r
 <GLT>\r
-  <FL Index="0" Name="Favorites List 1" Monitor="On" Q_Key="1" N_Tag="None"/>\r
-  <FL Index="1" Name="Favorites List 2" Monitor="On" Q_Key="2" N_Tag="2"/>\r
-  <FL Index="2" Name="Favorites List 3" Monitor="Off" Q_Key="5" N_Tag="999"/>\r
+  <FL Index="4294967295" Name="Full Database" Monitor="On" Q_Key="None" N_Tag="None"/>\r
+  <FL Index="0" Name="Local" Monitor="On" Q_Key="0" N_Tag="1"/>\r
+  <FL Index="2" Name="Public" Monitor="On" Q_Key="None" N_Tag="None"/>\r
 </GLT>\r
 ```
 

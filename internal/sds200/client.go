@@ -212,6 +212,12 @@ func (c *Client) runOnce(spec CommandSpec, args []string) (CommandResponse, erro
 			c.handleUnsolicited(cmd, fields, msg)
 			continue
 		}
+		if spec.Mode == ModeNormal && spec.Command == cmdPSI && bytes.Contains(msg, []byte(",<XML>,")) {
+			// PSI push telemetry frames can race ahead of the PSI,OK acknowledgment.
+			// Treat XML payloads as unsolicited telemetry and keep waiting for command ACK.
+			c.handleUnsolicited(cmd, fields, msg)
+			continue
+		}
 
 		resp := CommandResponse{Command: cmd, Fields: fields, Raw: msg}
 		switch spec.Mode {
@@ -276,19 +282,11 @@ func (c *Client) handleUnsolicited(cmd string, fields []string, raw []byte) {
 			log.Printf("sds200: failed to parse %s xml fragment: %v", cmd, err)
 		}
 	case cmdGST:
-		if gst, err := ParseGST(fields); err == nil {
-			status := c.telemetry.UpdateFromGST(gst)
-			c.dispatchTelemetry(status)
-		} else {
-			log.Printf("sds200: failed to parse GST: %v", err)
-		}
+		// Keep PSI/GSI as the canonical runtime telemetry source.
+		// GST is consumed as raw/diagnostic data to avoid mixed-source UI jitter.
 	case cmdSTS:
-		if sts, err := ParseSTS(fields); err == nil {
-			status := c.telemetry.UpdateFromSTS(sts)
-			c.dispatchTelemetry(status)
-		} else {
-			log.Printf("sds200: failed to parse STS: %v", err)
-		}
+		// Keep PSI/GSI as the canonical runtime telemetry source.
+		// STS is consumed as raw/diagnostic data to avoid mixed-source UI jitter.
 	}
 	c.dispatchRaw(resp)
 }

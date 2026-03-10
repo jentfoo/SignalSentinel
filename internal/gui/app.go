@@ -15,8 +15,10 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -90,7 +92,7 @@ func Run(ctx context.Context, deps Dependencies) error {
 		closeWindow()
 	})
 
-	go watchState(stateCtx, deps, ui, model)
+	go watchState(stateCtx, deps, window, ui, model)
 	go pollRecordings(stateCtx, deps, ui, model)
 	go watchRecordingDuration(stateCtx, ui, model)
 
@@ -144,14 +146,32 @@ func buildUI(model *uiModel, deps Dependencies, window fyne.Window) (uiViews, fu
 
 	model.mu.Lock()
 	initialState := model.state
+	pendingControlAction := model.pendingControlAction
 	pendingRecordingAction := model.pendingRecordingAction
 	pendingRecordingStop := model.pendingRecordingStop
 	model.mu.Unlock()
 
 	setExpertTabVisible(&views, initialState.Expert.Enabled)
-	views.content = tabs
+	controlAvailability := widget.NewLabel("")
+	controlAvailability.Alignment = fyne.TextAlignTrailing
+	connectionMetric := widget.NewLabel("-")
+	connectionMetric.Alignment = fyne.TextAlignTrailing
+	connectionIndicator := canvas.NewCircle(connectionIndicatorColor(initialState.Scanner.Connected))
+	views.controlAvailability = controlAvailability
+	views.connectionMetric = connectionMetric
+	views.connectionIndicator = connectionIndicator
+	availabilitySlot := container.NewGridWrap(fyne.NewSize(360, controlAvailability.MinSize().Height), controlAvailability)
+	indicatorSlot := container.NewCenter(container.NewGridWrap(fyne.NewSize(18, 18), connectionIndicator))
+	metricSlot := container.NewCenter(connectionMetric)
+	statusBadge := container.NewHBox(availabilitySlot, metricSlot, indicatorSlot)
+	badgeOverlay := container.NewVBox(
+		container.NewPadded(container.NewHBox(layout.NewSpacer(), statusBadge)),
+		layout.NewSpacer(),
+	)
+	views.content = container.NewStack(tabs, badgeOverlay)
 
 	applyRecordingButtonState(views.startRecButton, initialState, pendingRecordingAction, pendingRecordingStop, time.Now())
+	applyConnectionOverview(views, model, initialState.Scanner, pendingControlAction, time.Now())
 
 	return views, stopPlayback
 }
@@ -187,10 +207,7 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	tgidLabel := widget.NewLabel("-")
 	signalLabel := widget.NewLabel("-")
 	squelchLabel := widget.NewLabel("-")
-	squelchLvlLabel := widget.NewLabel("-")
-	muteLabel := widget.NewLabel("-")
 	volumeLabel := widget.NewLabel("-")
-	updatedLabel := widget.NewLabel("-")
 	sourceLabel.Wrapping = fyne.TextWrapWord
 	systemLabel.Wrapping = fyne.TextWrapWord
 	deptLabel.Wrapping = fyne.TextWrapWord
@@ -201,7 +218,7 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	nextButton := widget.NewButton("Next", nil)
 	previousButton := widget.NewButton("Previous", nil)
 	jumpTagButton := widget.NewButton("Jump Tag", nil)
-	qshButton := widget.NewButton("Quick Search Hold", nil)
+	qshButton := widget.NewButton("Set Freq", nil)
 	jumpScanButton := widget.NewButton("Jump Scan", nil)
 	jumpWXButton := widget.NewButton("Jump WX", nil)
 	avoidButton := widget.NewButton("Avoid", nil)
@@ -210,13 +227,7 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	commandAction := widget.NewLabel("-")
 	commandStatus := widget.NewLabel("-")
 	commandMessage := widget.NewLabel("-")
-	commandRawReason := widget.NewLabel("-")
-	commandRetryHint := widget.NewLabel("-")
-	controlStatusSummary := widget.NewLabel("-")
-	controlStatusSummary.Wrapping = fyne.TextWrapWord
 	commandMessage.Wrapping = fyne.TextWrapWord
-	commandRawReason.Wrapping = fyne.TextWrapWord
-	commandRetryHint.Wrapping = fyne.TextWrapWord
 	tagFavEntry := widget.NewEntry()
 	tagFavEntry.SetText("0")
 	tagSysEntry := widget.NewEntry()
@@ -224,7 +235,8 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	tagChanEntry := widget.NewEntry()
 	tagChanEntry.SetText("0")
 	qshFreqEntry := widget.NewEntry()
-	qshFreqEntry.SetText("4600000")
+	qshFreqEntry.SetText("460.0000")
+	qshFreqEntry.SetPlaceHolder("MHz, Hz, or scanner value")
 	volumeEntry := widget.NewEntry()
 	volumeEntry.SetText("10")
 	volumeEntry.SetPlaceHolder("0-29")
@@ -255,8 +267,6 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	monitorOutputSelect.SetSelected(monitorOutputDevice)
 	monitorApplyButton := widget.NewButton("Apply Monitor Settings", nil)
 	monitorStatusLabel := widget.NewLabel("-")
-	monitorErrorLabel := widget.NewLabel("-")
-	monitorErrorLabel.Wrapping = fyne.TextWrapWord
 	monitorListenAvailable := deps.SetMonitorListen != nil
 	monitorMuteAvailable := deps.SetMonitorMute != nil
 	monitorApplyAvailable := deps.SetMonitorGain != nil || deps.SetMonitorOutputDevice != nil
@@ -285,8 +295,6 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 			commandStatus.SetText("Failed")
 		}
 		commandMessage.SetText(orDash(result.Message))
-		commandRawReason.SetText(orDash(result.RawReason))
-		commandRetryHint.SetText(orDash(result.RetryHint))
 	}
 	controlButtons := []*widget.Button{
 		holdButton, nextButton, previousButton, avoidButton,
@@ -411,7 +419,7 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 		})
 	}
 	qshButton.OnTapped = func() {
-		freq, err := parseIntEntry("Quick search frequency", qshFreqEntry)
+		freq, err := parseQuickSearchFrequency(qshFreqEntry.Text)
 		if err != nil {
 			dialog.ShowError(err, window)
 			return
@@ -603,10 +611,7 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	views.tgidLabel = tgidLabel
 	views.signalLabel = signalLabel
 	views.squelchLabel = squelchLabel
-	views.squelchLvlLabel = squelchLvlLabel
-	views.muteLabel = muteLabel
 	views.volumeLabel = volumeLabel
-	views.updatedLabel = updatedLabel
 	views.holdButton = holdButton
 	views.nextButton = nextButton
 	views.previousButton = previousButton
@@ -620,9 +625,6 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	views.commandAction = commandAction
 	views.commandStatus = commandStatus
 	views.commandMessage = commandMessage
-	views.commandRawReason = commandRawReason
-	views.commandRetryHint = commandRetryHint
-	views.controlStatus = controlStatusSummary
 	views.tagFavEntry = tagFavEntry
 	views.tagSysEntry = tagSysEntry
 	views.tagChanEntry = tagChanEntry
@@ -636,25 +638,27 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 	views.monitorOutputSelect = monitorOutputSelect
 	views.monitorApplyButton = monitorApplyButton
 	views.monitorStatusLabel = monitorStatusLabel
-	views.monitorErrorLabel = monitorErrorLabel
 
 	commandField := func(label string, value *widget.Label) fyne.CanvasObject {
 		labelWidget := widget.NewLabel(label)
 		labelSlot := container.NewGridWrap(fyne.NewSize(84, labelWidget.MinSize().Height), labelWidget)
 		return container.NewBorder(nil, nil, labelSlot, nil, value)
 	}
+	sectionTitle := func(text string) fyne.CanvasObject {
+		return widget.NewLabelWithStyle(text, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	}
 	statusField := func(label string, value *widget.Label) *widget.FormItem {
 		return widget.NewFormItem(label, value)
 	}
-	statusSummary := widget.NewCard("Current Scanner", "", container.NewVBox(
+	statusSummary := widget.NewCard("", "", container.NewVBox(
 		widget.NewLabelWithStyle("Session", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		widget.NewForm(
-			statusField("Connection", connectionLabel),
 			statusField("State", lifecycleLabel),
 			statusField("Mode", modeLabel),
 			statusField("View", sourceLabel),
-			statusField("Updated", updatedLabel),
 			statusField("Signal", signalLabel),
+			statusField("Squelch", squelchLabel),
+			statusField("Volume", volumeLabel),
 		),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Channel", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -665,27 +669,17 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 			statusField("Channel", channelLabel),
 			statusField("Talkgroup", tgidLabel),
 		),
-		widget.NewSeparator(),
-		widget.NewLabelWithStyle("Audio", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		widget.NewForm(
-			statusField("Squelch", squelchLabel),
-			statusField("SQL Level", squelchLvlLabel),
-			statusField("Mute", muteLabel),
-			statusField("Volume", volumeLabel),
-		),
 	))
 
-	availabilityPanel := widget.NewCard("Control Availability", "", controlStatusSummary)
-	commandPanel := widget.NewCard("Last Command", "", container.NewVBox(
+	commandPanel := container.NewVBox(
+		sectionTitle("Last Command"),
 		commandField("Action", commandAction),
 		commandField("Status", commandStatus),
 		commandField("Message", commandMessage),
-		commandField("Raw", commandRawReason),
-		commandField("Retry", commandRetryHint),
-	))
+	)
 
 	controls := container.NewVBox(
-		widget.NewLabel("Live Monitor"),
+		sectionTitle("Live Monitor"),
 		container.NewHBox(monitorListenButton, monitorMuteButton, startRecButton),
 		container.NewHBox(
 			widget.NewLabel("Gain dB"),
@@ -696,11 +690,10 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 		),
 		widget.NewForm(
 			statusField("Monitor", monitorStatusLabel),
-			statusField("Last Error", monitorErrorLabel),
 		),
 		widget.NewSeparator(),
-		widget.NewLabel("Scanner Control"),
-		container.NewHBox(holdButton, nextButton, previousButton, avoidButton),
+		sectionTitle("Scanner Control"),
+		container.NewHBox(jumpScanButton, jumpWXButton, holdButton, nextButton, previousButton, avoidButton),
 		container.NewHBox(
 			widget.NewLabel("Fav"),
 			tagFavEntry,
@@ -711,11 +704,10 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 			jumpTagButton,
 		),
 		container.NewHBox(
-			widget.NewLabel("Freq Hz"),
+			widget.NewLabel("Frequency"),
 			qshFreqField,
 			qshButton,
 		),
-		container.NewHBox(jumpScanButton, jumpWXButton),
 		container.NewHBox(
 			widget.NewLabel("Volume"),
 			container.NewGridWrap(fyne.NewSize(100, volumeEntry.MinSize().Height), volumeEntry),
@@ -725,7 +717,6 @@ func buildStatusPanel(model *uiModel, deps Dependencies, window fyne.Window, vie
 			setSquelchButton,
 		),
 		widget.NewSeparator(),
-		availabilityPanel,
 		commandPanel,
 	)
 	controlsScroll := container.NewVScroll(controls)
@@ -745,6 +736,7 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 	dqkEntry := widget.NewMultiLineEntry()
 	svcEntry := widget.NewMultiLineEntry()
 	filterEntry := widget.NewEntry()
+	filterField := container.NewGridWrap(fyne.NewSize(220, filterEntry.MinSize().Height), filterEntry)
 	previewLabel := widget.NewLabel("-")
 	scopeTargetSelect := widget.NewSelect([]string{"Favorites", "Systems", "Departments", "Service Types"}, nil)
 	scopeTargetSelect.SetSelected("Favorites")
@@ -759,6 +751,7 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 	svcResetButton := widget.NewButton("Reset Service Types", nil)
 	profileNameEntry := widget.NewEntry()
 	profileNameEntry.SetPlaceHolder("profile name")
+	profileNameField := container.NewGridWrap(fyne.NewSize(220, profileNameEntry.MinSize().Height), profileNameEntry)
 	profileSelect := widget.NewSelect([]string{}, nil)
 	saveProfileButton := widget.NewButton("Save Profile", nil)
 	loadProfileButton := widget.NewButton("Edit Profile", nil)
@@ -930,17 +923,21 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 	}
 
 	if deps.LoadScanScope != nil {
-		loadScopeButton.OnTapped = func() {
+		loadScopeState := func(showErrors bool) {
 			fav, sys, err := loadScopeContext()
 			if err != nil {
-				dialog.ShowError(err, window)
+				if showErrors {
+					dialog.ShowError(err, window)
+				}
 				return
 			}
-			go func() {
-				scope, loadErr := deps.LoadScanScope(fav, sys)
+			go func(favoritesTag int, systemTag int, showErr bool) {
+				scope, loadErr := deps.LoadScanScope(favoritesTag, systemTag)
 				fyne.Do(func() {
 					if loadErr != nil {
-						dialog.ShowError(loadErr, window)
+						if showErr {
+							dialog.ShowError(loadErr, window)
+						}
 						return
 					}
 					stagedFQK = copyInts(scope.FavoritesQuickKeys)
@@ -954,8 +951,12 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 					svcEntry.SetText(encodeIndexList(binaryStateToIndexes(stagedSVC)))
 					refreshScopePreview()
 				})
-			}()
+			}(fav, sys, showErrors)
 		}
+		loadScopeButton.OnTapped = func() {
+			loadScopeState(true)
+		}
+		loadScopeState(false)
 	} else {
 		loadScopeButton.Disable()
 	}
@@ -1193,12 +1194,12 @@ func buildScopePanel(model *uiModel, deps Dependencies, window fyne.Window, runS
 			widget.NewFormItem("Service Types \u2014 On Indexes (0-46)", svcEntry),
 		),
 		container.NewHBox(applyFQKButton, applySQKButton, applyDQKButton, applySVCButton),
-		container.NewHBox(scopeTargetSelect, filterEntry, selectAllButton, selectNoneButton),
+		container.NewHBox(scopeTargetSelect, filterField, selectAllButton, selectNoneButton),
 		container.NewHBox(svcDefaultsButton, svcResetButton),
 		previewLabel,
 		widget.NewSeparator(),
 		widget.NewLabel("Scan Profiles"),
-		container.NewHBox(profileNameEntry, saveProfileButton, refreshProfilesButton),
+		container.NewHBox(profileNameField, saveProfileButton, refreshProfilesButton),
 		container.NewHBox(profileSelect, loadProfileButton, applyProfileButton, deleteProfileButton),
 	)
 }

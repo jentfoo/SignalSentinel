@@ -36,6 +36,12 @@ type uiModel struct {
 	monitorListenAvailable bool
 	monitorMuteAvailable   bool
 	monitorApplyAvailable  bool
+	lastMonitorError       string
+	metricLastCommitAt     time.Time
+	metricWindowMax        time.Duration
+	metricWindowSamples    int
+	metricCommitted        time.Duration
+	metricInitialized      bool
 	lastConnected          bool
 	everConnected          bool
 	fatalReceived          bool

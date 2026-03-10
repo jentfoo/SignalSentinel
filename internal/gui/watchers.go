@@ -4,17 +4,20 @@ package gui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"image/color"
 	"strconv"
 	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 )
 
-func watchState(ctx context.Context, deps Dependencies, ui uiViews, model *uiModel) {
+func watchState(ctx context.Context, deps Dependencies, window fyne.Window, ui uiViews, model *uiModel) {
 	ch := deps.SubscribeState(ctx)
 	for {
 		select {
@@ -26,6 +29,7 @@ func watchState(ctx context.Context, deps Dependencies, ui uiViews, model *uiMod
 			}
 			fyne.Do(func() {
 				applyState(ui, model, state)
+				showMonitorErrorDialog(window, model, state.Monitor.LastError)
 			})
 		}
 	}
@@ -60,8 +64,10 @@ func watchRecordingDuration(ctx context.Context, ui uiViews, model *uiModel) {
 				state := model.state
 				pending := model.pendingRecordingAction
 				pendingStop := model.pendingRecordingStop
+				pendingControlAction := model.pendingControlAction
 				model.mu.Unlock()
 				applyRecordingButtonState(ui.startRecButton, state, pending, pendingStop, at)
+				applyConnectionOverview(ui, model, state.Scanner, pendingControlAction, at)
 			})
 		}
 	}
@@ -82,6 +88,7 @@ func watchFatal(ctx context.Context, fatal <-chan error, window fyne.Window, ui 
 			if ui.connectionLabel != nil {
 				ui.connectionLabel.SetText("Disconnected")
 			}
+			setConnectionIndicator(ui.connectionIndicator, false)
 			errDialog := dialog.NewError(err, window)
 			errDialog.SetOnClosed(func() {
 				window.Close()
@@ -114,6 +121,7 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 	if ui.connectionLabel != nil {
 		ui.connectionLabel.SetText(connectionStatusText(scanner.Connected, fatalReceived, everConnected))
 	}
+	applyConnectionOverview(ui, model, scanner, pendingControlAction, time.Now())
 	ui.modeLabel.SetText(orDash(scanner.Mode))
 	if ui.lifecycleLabel != nil {
 		lifecycle := strings.TrimSpace(scanner.LifecycleMode)
@@ -129,15 +137,8 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 	ui.channelLabel.SetText(orDash(scanner.Channel))
 	ui.tgidLabel.SetText(talkgroupOrDash(scanner.Talkgroup))
 	ui.signalLabel.SetText(strconv.Itoa(scanner.Signal))
-	ui.squelchLabel.SetText(boolWord(scanner.SquelchOpen, "open", "closed"))
-	ui.squelchLvlLabel.SetText(strconv.Itoa(scanner.Squelch))
-	ui.muteLabel.SetText(boolWord(scanner.Mute, "muted", "unmuted"))
-	ui.volumeLabel.SetText(strconv.Itoa(scanner.Volume))
-	if scanner.UpdatedAt.IsZero() {
-		ui.updatedLabel.SetText("-")
-	} else {
-		ui.updatedLabel.SetText(scanner.UpdatedAt.UTC().Format(time.RFC3339))
-	}
+	ui.squelchLabel.SetText(fmt.Sprintf("%d (%s)", scanner.Squelch, boolWord(scanner.SquelchOpen, "open", "closed")))
+	ui.volumeLabel.SetText(fmt.Sprintf("%d (%s)", scanner.Volume, boolWord(scanner.Mute, "muted", "unmuted")))
 
 	holdIntent := IntentHoldCurrent
 	holdLabel := "Hold"
@@ -191,7 +192,7 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 		setEnabled(ui.setVolumeButton, false)
 		setEnabled(ui.setSquelchButton, false)
 	}
-	if ui.controlStatus != nil {
+	if ui.controlAvailability != nil {
 		disabled := make([]string, 0, 10)
 		addDisabled := func(name string, capability ControlCapability) {
 			if capability.Available {
@@ -201,7 +202,7 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 			if reason == "" {
 				reason = "unavailable"
 			}
-			disabled = append(disabled, fmt.Sprintf("%s: %s", name, reason))
+			disabled = append(disabled, fmt.Sprintf("%s (%s)", name, reason))
 		}
 		addDisabled(holdLabel, holdCap)
 		addDisabled("Next", nextCap)
@@ -213,14 +214,7 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 		addDisabled(avoidLabel, avoidCap)
 		addDisabled("Volume", volumeCap)
 		addDisabled("Squelch", squelchCap)
-		switch len(disabled) {
-		case 0:
-			ui.controlStatus.SetText("All visible controls available.")
-		case 1, 2, 3:
-			ui.controlStatus.SetText(strings.Join(disabled, " | "))
-		default:
-			ui.controlStatus.SetText(fmt.Sprintf("%s | +%d more", strings.Join(disabled[:3], " | "), len(disabled)-3))
-		}
+		ui.controlAvailability.SetText(controlAvailabilityText(disabled))
 	}
 	applyRecordingButtonState(ui.startRecButton, state, pendingRecordingAction, pendingRecordingStop, time.Now())
 	if ui.monitorStatusLabel != nil {
@@ -232,9 +226,6 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 			monitorState += " (Muted)"
 		}
 		ui.monitorStatusLabel.SetText(monitorState)
-	}
-	if ui.monitorErrorLabel != nil {
-		ui.monitorErrorLabel.SetText(orDash(state.Monitor.LastError))
 	}
 	if ui.monitorListenButton != nil {
 		if state.Monitor.Enabled {
@@ -350,6 +341,28 @@ func applyState(ui uiViews, model *uiModel, state RuntimeState) {
 	}
 }
 
+func showMonitorErrorDialog(window fyne.Window, model *uiModel, monitorErr string) {
+	if window == nil || model == nil {
+		return
+	}
+
+	trimmed := strings.TrimSpace(monitorErr)
+	if trimmed == "-" {
+		trimmed = ""
+	}
+
+	model.mu.Lock()
+	previous := model.lastMonitorError
+	model.lastMonitorError = trimmed
+	model.mu.Unlock()
+
+	if trimmed == "" || trimmed == previous {
+		return
+	}
+
+	dialog.ShowError(errors.New(trimmed), window)
+}
+
 func connectionStatusText(connected, fatalReceived, everConnected bool) string {
 	if connected {
 		return "Connected"
@@ -361,6 +374,92 @@ func connectionStatusText(connected, fatalReceived, everConnected bool) string {
 		return "Reconnecting..."
 	}
 	return "Connecting..."
+}
+
+func applyConnectionOverview(ui uiViews, model *uiModel, scanner ScannerStatus, pendingControlAction bool, at time.Time) {
+	setConnectionIndicator(ui.connectionIndicator, scanner.Connected)
+	if ui.connectionMetric != nil {
+		ui.connectionMetric.SetText(connectionMetricText(model, scanner.UpdatedAt, pendingControlAction, at))
+	}
+}
+
+func setConnectionIndicator(indicator *canvas.Circle, connected bool) {
+	if indicator == nil {
+		return
+	}
+	indicator.FillColor = connectionIndicatorColor(connected)
+	indicator.Refresh()
+}
+
+func connectionIndicatorColor(connected bool) color.Color {
+	if connected {
+		return color.NRGBA{R: 46, G: 184, B: 74, A: 255}
+	}
+	return color.NRGBA{R: 212, G: 60, B: 60, A: 255}
+}
+
+func connectionMetricText(model *uiModel, updatedAt time.Time, pendingControlAction bool, at time.Time) string {
+	queueDepth := 0
+	if pendingControlAction {
+		queueDepth = 1
+	}
+	latency := windowedTelemetryLatency(model, updatedAt, at)
+	if latency < 0 {
+		return fmt.Sprintf("Q%d | -", queueDepth)
+	}
+	return fmt.Sprintf("Q%d | %dms", queueDepth, latency.Milliseconds())
+}
+
+func controlAvailabilityText(disabled []string) string {
+	switch len(disabled) {
+	case 0:
+		return ""
+	case 1:
+		return "Blocked: " + disabled[0]
+	default:
+		return fmt.Sprintf("Blocked: %s +%d", disabled[0], len(disabled)-1)
+	}
+}
+
+func windowedTelemetryLatency(model *uiModel, updatedAt, at time.Time) time.Duration {
+	if updatedAt.IsZero() {
+		return -1
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	sample := at.Sub(updatedAt)
+	if sample < 0 {
+		sample = 0
+	}
+	if model == nil {
+		return sample
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+
+	if !model.metricInitialized {
+		model.metricInitialized = true
+		model.metricLastCommitAt = at
+		model.metricWindowMax = sample
+		model.metricWindowSamples = 1
+		model.metricCommitted = sample
+		return model.metricCommitted
+	}
+
+	if model.metricWindowSamples == 0 || sample > model.metricWindowMax {
+		model.metricWindowMax = sample
+	}
+	model.metricWindowSamples++
+
+	if at.Sub(model.metricLastCommitAt) >= 10*time.Second {
+		model.metricCommitted = model.metricWindowMax
+		model.metricLastCommitAt = at
+		model.metricWindowMax = 0
+		model.metricWindowSamples = 0
+	}
+
+	return model.metricCommitted
 }
 
 func capabilityFor(scanner ScannerStatus, intent ControlIntent) ControlCapability {

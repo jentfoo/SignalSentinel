@@ -23,6 +23,7 @@ type SDS200Client interface {
 	Resync() (sds200.RuntimeStatus, error)
 	StartPushScannerInfo(intervalMS int) error
 	Hold(tkw, x1, x2 string) error
+	KeyPress(code string, mode sds200.KeyMode) error
 	Next(tkw, x1, x2 string, count int) error
 	Previous(tkw, x1, x2 string, count int) error
 	Avoid(tkw, x1, x2 string, status int) error
@@ -95,7 +96,7 @@ func (c SessionConfig) withDefaults() SessionConfig {
 		c.WriteTimeout = c.ResponseTimeout
 	}
 	if c.PushIntervalMS <= 0 {
-		c.PushIntervalMS = 500
+		c.PushIntervalMS = 200
 	}
 	if c.HealthCheckInterval <= 0 {
 		c.HealthCheckInterval = 20 * time.Second
@@ -316,21 +317,30 @@ func (s *ScannerSession) supervise() {
 		case <-ticker.C:
 			if err := s.healthCheck(); err != nil {
 				consecutiveFails++
-				log.Printf("session: scanner health check failed (%d/%d): %v", consecutiveFails, s.cfg.MaxReconnectFails, err)
-				if consecutiveFails >= s.cfg.MaxReconnectFails {
-					s.signalFatal(fmt.Errorf("scanner reconnect budget exceeded: %w", err))
-					return
-				}
+				log.Printf("session: scanner health check failed (%d): %v", consecutiveFails, err)
+				delay := s.reconnectBackoff(consecutiveFails)
 				select {
 				case <-s.ctx.Done():
 					return
-				case <-time.After(s.cfg.ReconnectDelay):
+				case <-time.After(delay):
 				}
 				continue
+			}
+			if consecutiveFails > 0 {
+				log.Printf("session: scanner reconnected after %d failed attempts", consecutiveFails)
 			}
 			consecutiveFails = 0
 		}
 	}
+}
+
+func (s *ScannerSession) reconnectBackoff(consecutiveFails int) time.Duration {
+	base := s.cfg.ReconnectDelay
+	multiplier := consecutiveFails
+	if multiplier > s.cfg.MaxReconnectFails {
+		multiplier = s.cfg.MaxReconnectFails
+	}
+	return base * time.Duration(multiplier)
 }
 
 func (s *ScannerSession) healthCheck() error {
@@ -426,12 +436,10 @@ func (s *ScannerSession) executeIntent(intent ControlIntent, params ControlParam
 	case IntentResumeScan:
 		return client.JumpMode("SCN_MODE", "0")
 	case IntentHold:
-		status := client.TelemetrySnapshot()
-		target := status.HoldTarget
-		if target.Keyword == "" || target.Arg1 == "" {
-			return errors.New("hold target unavailable for current scanner state")
+		if client.TelemetrySnapshot().Hold {
+			return nil // already held, don't toggle
 		}
-		return client.Hold(target.Keyword, target.Arg1, target.Arg2)
+		return client.KeyPress("C", sds200.KeyModePress)
 	case IntentNext:
 		target, err := navigationTarget(client.TelemetrySnapshot())
 		if err != nil {
@@ -985,13 +993,4 @@ func (s *ScannerSession) publishScannerState(status sds200.RuntimeStatus) {
 	state := s.stateHub.snapshot()
 	state.Scanner = status
 	s.stateHub.publish(state)
-}
-
-func (s *ScannerSession) signalFatal(err error) {
-	log.Printf("session: hard fault: %v", err)
-	select {
-	case s.fatalErr <- err:
-	default:
-	}
-	s.cancel()
 }

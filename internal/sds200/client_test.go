@@ -166,7 +166,7 @@ func TestClientOnTelemetry(t *testing.T) {
 		switch readRequestCommand(req) {
 		case cmdMDL:
 			return []string{
-				"GST,00000,l1,m1,l2,m2,l3,m3,l4,m4,l5,m5,Mute,1,0,1,851.0125,NFM,0,851.0125,850.0000,852.0000,0,3\r",
+				splitXMLResponse("PSI", scannerInfoXML("Scan Mode")),
 				"MDL,SDS200\r",
 			}
 		default:
@@ -189,7 +189,8 @@ func TestClientOnTelemetry(t *testing.T) {
 	defer cancel()
 	select {
 	case got := <-updates:
-		assert.Equal(t, "851.0125", got.Frequency)
+		assert.Equal(t, "155.2200", got.Frequency)
+		assert.Equal(t, "Scan Mode", got.Mode)
 	case <-ctx.Done():
 		t.Fatal("expected telemetry callback")
 	}
@@ -224,6 +225,37 @@ func TestClientProcessesUnsolicitedWhenIdle(t *testing.T) {
 		assert.Equal(t, "Fire Ops", got.Channel)
 	case <-ctx.Done():
 		t.Fatal("expected telemetry callback from unsolicited PSI")
+	}
+}
+
+func TestStartPushScannerInfoIgnoresPushFrameBeforeAck(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(req string) []string {
+		if readRequestCommand(req) == cmdPSI {
+			return []string{splitXMLResponse("PSI", scannerInfoXML("Scan Mode")), "PSI,OK\r"}
+		}
+		return nil
+	})
+
+	updates := make(chan RuntimeStatus, 1)
+	client.OnTelemetry(func(status RuntimeStatus) {
+		select {
+		case updates <- status:
+		default:
+		}
+	})
+
+	require.NoError(t, client.StartPushScannerInfo(0))
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	select {
+	case got := <-updates:
+		assert.True(t, got.Connected)
+		assert.Equal(t, "Scan Mode", got.Mode)
+	case <-ctx.Done():
+		t.Fatal("expected telemetry callback from PSI push frame")
 	}
 }
 

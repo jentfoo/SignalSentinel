@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,46 +17,48 @@ import (
 type fakeSDS200Client struct {
 	mu sync.Mutex
 
-	resyncStatus  sds200.RuntimeStatus
-	resyncErr     error
-	startPushErr  error
-	modelErr      error
-	firmwareErr   error
-	holdErr       error
-	nextErr       error
-	previousErr   error
-	avoidErr      error
-	jumpNumErr    error
-	quickSHoldErr error
-	jumpErr       error
-	getFQKErr     error
-	setFQKErr     error
-	getSQKErr     error
-	setSQKErr     error
-	getDQKErr     error
-	setDQKErr     error
-	getSVCErr     error
-	setSVCErr     error
-	setVolumeErr  error
-	setSquelchErr error
-	enterMenuErr  error
-	menuStatusErr error
-	menuSetErr    error
-	menuBackErr   error
-	analyzeErr    error
-	analyzePRErr  error
-	pushWFErr     error
-	getWFErr      error
-	getDTMErr     error
-	setDTMErr     error
-	getLCRErr     error
-	setLCRErr     error
-	getChargeErr  error
-	keepAliveErr  error
-	powerOffErr   error
-	closeErr      error
+	resyncStatus      sds200.RuntimeStatus
+	resyncErr         error
+	getScannerInfoErr error
+	startPushErr      error
+	modelErr          error
+	firmwareErr       error
+	holdErr           error
+	nextErr           error
+	previousErr       error
+	avoidErr          error
+	jumpNumErr        error
+	quickSHoldErr     error
+	jumpErr           error
+	getFQKErr         error
+	setFQKErr         error
+	getSQKErr         error
+	setSQKErr         error
+	getDQKErr         error
+	setDQKErr         error
+	getSVCErr         error
+	setSVCErr         error
+	setVolumeErr      error
+	setSquelchErr     error
+	enterMenuErr      error
+	menuStatusErr     error
+	menuSetErr        error
+	menuBackErr       error
+	analyzeErr        error
+	analyzePRErr      error
+	pushWFErr         error
+	getWFErr          error
+	getDTMErr         error
+	setDTMErr         error
+	getLCRErr         error
+	setLCRErr         error
+	getChargeErr      error
+	keepAliveErr      error
+	powerOffErr       error
+	closeErr          error
 
 	telemetrySnapshot   sds200.RuntimeStatus
+	scannerInfo         sds200.ScannerInfo
 	onTelemetry         func(sds200.RuntimeStatus)
 	model               string
 	firmwareVersion     string
@@ -69,41 +72,46 @@ type fakeSDS200Client struct {
 	departmentQuickKeys sds200.QuickKeyState
 	serviceTypes        []int
 
-	resyncCalls     int
-	startPushCalls  []int
-	holdCalls       []holdCall
-	nextCalls       []navCall
-	previousCalls   []navCall
-	avoidCalls      []avoidCall
-	jumpNumCalls    []jumpNumberCall
-	quickSHold      []int
-	jumpCalls       []jumpCall
-	getSQKCalls     []int
-	getDQKCalls     []quickKeyTarget
-	setFQKCalls     []sds200.QuickKeyState
-	setSQKCalls     []quickKeyWrite
-	setDQKCalls     []quickKeyWrite
-	setSVCCalls     [][]int
-	setVolumeCalls  []int
-	setSquelchCalls []int
-	enterMenuCalls  []menuCall
-	menuSetCalls    []string
-	menuBackCalls   []string
-	analyzeCalls    []analyzeCall
-	analyzePRCalls  []string
-	pushWFCalls     []waterfallCall
-	getWFCalls      []waterfallCall
-	getDTMCalls     int
-	setDTMCalls     []dateTimeCall
-	getLCRCalls     int
-	setLCRCalls     []locationCall
-	keepAliveCalls  int
-	powerOffCalls   int
-	modelCalls      int
-	firmwareCalls   int
-	menuStatusCalls int
-	getChargeCalls  int
-	closeCalls      int
+	resyncCalls         int
+	getScannerInfoCalls int
+	startPushCalls      []int
+	holdCalls           []holdCall
+	nextCalls           []navCall
+	previousCalls       []navCall
+	avoidCalls          []avoidCall
+	jumpNumCalls        []jumpNumberCall
+	quickSHold          []int
+	jumpCalls           []jumpCall
+	getSQKCalls         []int
+	getDQKCalls         []quickKeyTarget
+	setFQKCalls         []sds200.QuickKeyState
+	setSQKCalls         []quickKeyWrite
+	setDQKCalls         []quickKeyWrite
+	setSVCCalls         [][]int
+	setVolumeCalls      []int
+	setSquelchCalls     []int
+	enterMenuCalls      []menuCall
+	menuSetCalls        []string
+	menuBackCalls       []string
+	analyzeCalls        []analyzeCall
+	analyzePRCalls      []string
+	pushWFCalls         []waterfallCall
+	getWFCalls          []waterfallCall
+	getDTMCalls         int
+	setDTMCalls         []dateTimeCall
+	getLCRCalls         int
+	setLCRCalls         []locationCall
+	keepAliveCalls      int
+	powerOffCalls       int
+	modelCalls          int
+	firmwareCalls       int
+	menuStatusCalls     int
+	getChargeCalls      int
+	closeCalls          int
+
+	keyPressCalls  []keyPressCall
+	keyPressErr    error
+	keyPressSignal chan struct{}
 
 	holdSignal  chan struct{}
 	avoidSignal chan struct{}
@@ -114,6 +122,11 @@ type holdCall struct {
 	keyword string
 	arg1    string
 	arg2    string
+}
+
+type keyPressCall struct {
+	code string
+	mode sds200.KeyMode
 }
 
 type jumpCall struct {
@@ -203,6 +216,13 @@ func (f *fakeSDS200Client) Resync() (sds200.RuntimeStatus, error) {
 	return f.resyncStatus, f.resyncErr
 }
 
+func (f *fakeSDS200Client) GetScannerInfo() (sds200.ScannerInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getScannerInfoCalls++
+	return f.scannerInfo, f.getScannerInfoErr
+}
+
 func (f *fakeSDS200Client) StartPushScannerInfo(intervalMS int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -229,6 +249,22 @@ func (f *fakeSDS200Client) Hold(tkw, x1, x2 string) error {
 	f.holdCalls = append(f.holdCalls, holdCall{keyword: tkw, arg1: x1, arg2: x2})
 	signal := f.holdSignal
 	err := f.holdErr
+	f.mu.Unlock()
+
+	if signal != nil {
+		select {
+		case signal <- struct{}{}:
+		default:
+		}
+	}
+	return err
+}
+
+func (f *fakeSDS200Client) KeyPress(code string, mode sds200.KeyMode) error {
+	f.mu.Lock()
+	f.keyPressCalls = append(f.keyPressCalls, keyPressCall{code: code, mode: mode})
+	signal := f.keyPressSignal
+	err := f.keyPressErr
 	f.mu.Unlock()
 
 	if signal != nil {
@@ -532,82 +568,86 @@ func (f *fakeSDS200Client) snapshot() fakeClientSnapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return fakeClientSnapshot{
-		resyncCalls:     f.resyncCalls,
-		startPushCalls:  append([]int(nil), f.startPushCalls...),
-		holdCalls:       append([]holdCall(nil), f.holdCalls...),
-		nextCalls:       append([]navCall(nil), f.nextCalls...),
-		previousCalls:   append([]navCall(nil), f.previousCalls...),
-		avoidCalls:      append([]avoidCall(nil), f.avoidCalls...),
-		jumpNumCalls:    append([]jumpNumberCall(nil), f.jumpNumCalls...),
-		quickSHold:      append([]int(nil), f.quickSHold...),
-		jumpCalls:       append([]jumpCall(nil), f.jumpCalls...),
-		getSQKCalls:     append([]int(nil), f.getSQKCalls...),
-		getDQKCalls:     append([]quickKeyTarget(nil), f.getDQKCalls...),
-		setFQKCalls:     append([]sds200.QuickKeyState(nil), f.setFQKCalls...),
-		setSQKCalls:     append([]quickKeyWrite(nil), f.setSQKCalls...),
-		setDQKCalls:     append([]quickKeyWrite(nil), f.setDQKCalls...),
-		setSVCCalls:     cloneNestedInts(f.setSVCCalls),
-		setVolumeCalls:  append([]int(nil), f.setVolumeCalls...),
-		setSquelchCalls: append([]int(nil), f.setSquelchCalls...),
-		enterMenuCalls:  append([]menuCall(nil), f.enterMenuCalls...),
-		menuSetCalls:    append([]string(nil), f.menuSetCalls...),
-		menuBackCalls:   append([]string(nil), f.menuBackCalls...),
-		analyzeCalls:    append([]analyzeCall(nil), f.analyzeCalls...),
-		analyzePRCalls:  append([]string(nil), f.analyzePRCalls...),
-		pushWFCalls:     append([]waterfallCall(nil), f.pushWFCalls...),
-		getWFCalls:      append([]waterfallCall(nil), f.getWFCalls...),
-		getDTMCalls:     f.getDTMCalls,
-		setDTMCalls:     append([]dateTimeCall(nil), f.setDTMCalls...),
-		getLCRCalls:     f.getLCRCalls,
-		setLCRCalls:     append([]locationCall(nil), f.setLCRCalls...),
-		keepAliveCalls:  f.keepAliveCalls,
-		powerOffCalls:   f.powerOffCalls,
-		modelCalls:      f.modelCalls,
-		firmwareCalls:   f.firmwareCalls,
-		menuStatusCalls: f.menuStatusCalls,
-		getChargeCalls:  f.getChargeCalls,
-		closeCalls:      f.closeCalls,
-		hasTelemetry:    f.onTelemetry != nil,
+		resyncCalls:         f.resyncCalls,
+		getScannerInfoCalls: f.getScannerInfoCalls,
+		startPushCalls:      append([]int(nil), f.startPushCalls...),
+		holdCalls:           append([]holdCall(nil), f.holdCalls...),
+		keyPressCalls:       append([]keyPressCall(nil), f.keyPressCalls...),
+		nextCalls:           append([]navCall(nil), f.nextCalls...),
+		previousCalls:       append([]navCall(nil), f.previousCalls...),
+		avoidCalls:          append([]avoidCall(nil), f.avoidCalls...),
+		jumpNumCalls:        append([]jumpNumberCall(nil), f.jumpNumCalls...),
+		quickSHold:          append([]int(nil), f.quickSHold...),
+		jumpCalls:           append([]jumpCall(nil), f.jumpCalls...),
+		getSQKCalls:         append([]int(nil), f.getSQKCalls...),
+		getDQKCalls:         append([]quickKeyTarget(nil), f.getDQKCalls...),
+		setFQKCalls:         append([]sds200.QuickKeyState(nil), f.setFQKCalls...),
+		setSQKCalls:         append([]quickKeyWrite(nil), f.setSQKCalls...),
+		setDQKCalls:         append([]quickKeyWrite(nil), f.setDQKCalls...),
+		setSVCCalls:         cloneNestedInts(f.setSVCCalls),
+		setVolumeCalls:      append([]int(nil), f.setVolumeCalls...),
+		setSquelchCalls:     append([]int(nil), f.setSquelchCalls...),
+		enterMenuCalls:      append([]menuCall(nil), f.enterMenuCalls...),
+		menuSetCalls:        append([]string(nil), f.menuSetCalls...),
+		menuBackCalls:       append([]string(nil), f.menuBackCalls...),
+		analyzeCalls:        append([]analyzeCall(nil), f.analyzeCalls...),
+		analyzePRCalls:      append([]string(nil), f.analyzePRCalls...),
+		pushWFCalls:         append([]waterfallCall(nil), f.pushWFCalls...),
+		getWFCalls:          append([]waterfallCall(nil), f.getWFCalls...),
+		getDTMCalls:         f.getDTMCalls,
+		setDTMCalls:         append([]dateTimeCall(nil), f.setDTMCalls...),
+		getLCRCalls:         f.getLCRCalls,
+		setLCRCalls:         append([]locationCall(nil), f.setLCRCalls...),
+		keepAliveCalls:      f.keepAliveCalls,
+		powerOffCalls:       f.powerOffCalls,
+		modelCalls:          f.modelCalls,
+		firmwareCalls:       f.firmwareCalls,
+		menuStatusCalls:     f.menuStatusCalls,
+		getChargeCalls:      f.getChargeCalls,
+		closeCalls:          f.closeCalls,
+		hasTelemetry:        f.onTelemetry != nil,
 	}
 }
 
 type fakeClientSnapshot struct {
-	resyncCalls     int
-	startPushCalls  []int
-	holdCalls       []holdCall
-	nextCalls       []navCall
-	previousCalls   []navCall
-	avoidCalls      []avoidCall
-	jumpNumCalls    []jumpNumberCall
-	quickSHold      []int
-	jumpCalls       []jumpCall
-	getSQKCalls     []int
-	getDQKCalls     []quickKeyTarget
-	setFQKCalls     []sds200.QuickKeyState
-	setSQKCalls     []quickKeyWrite
-	setDQKCalls     []quickKeyWrite
-	setSVCCalls     [][]int
-	setVolumeCalls  []int
-	setSquelchCalls []int
-	enterMenuCalls  []menuCall
-	menuSetCalls    []string
-	menuBackCalls   []string
-	analyzeCalls    []analyzeCall
-	analyzePRCalls  []string
-	pushWFCalls     []waterfallCall
-	getWFCalls      []waterfallCall
-	getDTMCalls     int
-	setDTMCalls     []dateTimeCall
-	getLCRCalls     int
-	setLCRCalls     []locationCall
-	keepAliveCalls  int
-	powerOffCalls   int
-	modelCalls      int
-	firmwareCalls   int
-	menuStatusCalls int
-	getChargeCalls  int
-	closeCalls      int
-	hasTelemetry    bool
+	resyncCalls         int
+	getScannerInfoCalls int
+	startPushCalls      []int
+	holdCalls           []holdCall
+	keyPressCalls       []keyPressCall
+	nextCalls           []navCall
+	previousCalls       []navCall
+	avoidCalls          []avoidCall
+	jumpNumCalls        []jumpNumberCall
+	quickSHold          []int
+	jumpCalls           []jumpCall
+	getSQKCalls         []int
+	getDQKCalls         []quickKeyTarget
+	setFQKCalls         []sds200.QuickKeyState
+	setSQKCalls         []quickKeyWrite
+	setDQKCalls         []quickKeyWrite
+	setSVCCalls         [][]int
+	setVolumeCalls      []int
+	setSquelchCalls     []int
+	enterMenuCalls      []menuCall
+	menuSetCalls        []string
+	menuBackCalls       []string
+	analyzeCalls        []analyzeCall
+	analyzePRCalls      []string
+	pushWFCalls         []waterfallCall
+	getWFCalls          []waterfallCall
+	getDTMCalls         int
+	setDTMCalls         []dateTimeCall
+	getLCRCalls         int
+	setLCRCalls         []locationCall
+	keepAliveCalls      int
+	powerOffCalls       int
+	modelCalls          int
+	firmwareCalls       int
+	menuStatusCalls     int
+	getChargeCalls      int
+	closeCalls          int
+	hasTelemetry        bool
 }
 
 func cloneQuickKeyState(in sds200.QuickKeyState) sds200.QuickKeyState {
@@ -634,7 +674,7 @@ func TestSessionConfigWithDefaults(t *testing.T) {
 		assert.Equal(t, 3, cfg.Retries)
 		assert.Equal(t, 2*time.Second, cfg.ReadTimeout)
 		assert.Equal(t, 2*time.Second, cfg.WriteTimeout)
-		assert.Equal(t, 500, cfg.PushIntervalMS)
+		assert.Equal(t, 200, cfg.PushIntervalMS)
 		assert.Equal(t, 20*time.Second, cfg.HealthCheckInterval)
 		assert.Equal(t, 3*time.Second, cfg.ReconnectDelay)
 		assert.Equal(t, 5, cfg.MaxReconnectFails)
@@ -716,30 +756,28 @@ func TestScannerSessionExecuteIntent(t *testing.T) {
 		assert.Equal(t, "0", snap.jumpCalls[0].index)
 	})
 
-	t.Run("hold_calls_hold_target", func(t *testing.T) {
+	t.Run("hold_sends_key_press", func(t *testing.T) {
+		client := &fakeSDS200Client{}
+		session := &ScannerSession{client: client}
+
+		require.NoError(t, session.executeIntent(IntentHold, ControlParams{}))
+
+		snap := client.snapshot()
+		require.Len(t, snap.keyPressCalls, 1)
+		assert.Equal(t, "C", snap.keyPressCalls[0].code)
+		assert.Equal(t, sds200.KeyModePress, snap.keyPressCalls[0].mode)
+	})
+
+	t.Run("hold_skips_when_already_held", func(t *testing.T) {
 		client := &fakeSDS200Client{
-			telemetrySnapshot: sds200.RuntimeStatus{
-				HoldTarget: sds200.HoldTarget{Keyword: "TGID", Arg1: "100", Arg2: "2"},
-			},
+			telemetrySnapshot: sds200.RuntimeStatus{Hold: true},
 		}
 		session := &ScannerSession{client: client}
 
 		require.NoError(t, session.executeIntent(IntentHold, ControlParams{}))
 
 		snap := client.snapshot()
-		require.Len(t, snap.holdCalls, 1)
-		assert.Equal(t, "TGID", snap.holdCalls[0].keyword)
-		assert.Equal(t, "100", snap.holdCalls[0].arg1)
-		assert.Equal(t, "2", snap.holdCalls[0].arg2)
-	})
-
-	t.Run("hold_requires_hold_target", func(t *testing.T) {
-		client := &fakeSDS200Client{}
-		session := &ScannerSession{client: client}
-
-		err := session.executeIntent(IntentHold, ControlParams{})
-		require.Error(t, err)
-		assert.Equal(t, "hold target unavailable for current scanner state", err.Error())
+		assert.Empty(t, snap.keyPressCalls)
 	})
 
 	t.Run("avoid_calls_avoid_target", func(t *testing.T) {
@@ -1347,10 +1385,7 @@ func TestScannerSessionControlLoop(t *testing.T) {
 	t.Run("executes_enqueued_control", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		client := &fakeSDS200Client{
-			telemetrySnapshot: sds200.RuntimeStatus{
-				HoldTarget: sds200.HoldTarget{Keyword: "TGID", Arg1: "100", Arg2: "2"},
-			},
-			holdSignal: make(chan struct{}, 1),
+			keyPressSignal: make(chan struct{}, 1),
 		}
 		session := &ScannerSession{
 			ctx:       ctx,
@@ -1363,14 +1398,14 @@ func TestScannerSessionControlLoop(t *testing.T) {
 		go session.controlLoop()
 
 		session.EnqueueControl(IntentHold)
-		requireSignal(t, client.holdSignal)
+		requireSignal(t, client.keyPressSignal)
 
 		cancel()
 		requireWaitGroupDone(t, &session.wg)
 
 		snap := client.snapshot()
-		require.Len(t, snap.holdCalls, 1)
-		assert.Equal(t, "TGID", snap.holdCalls[0].keyword)
+		require.Len(t, snap.keyPressCalls, 1)
+		assert.Equal(t, "C", snap.keyPressCalls[0].code)
 	})
 }
 
@@ -1395,11 +1430,7 @@ func TestScannerSessionExecuteControl(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 
-		client := &fakeSDS200Client{
-			telemetrySnapshot: sds200.RuntimeStatus{
-				HoldTarget: sds200.HoldTarget{Keyword: "TGID", Arg1: "100", Arg2: "2"},
-			},
-		}
+		client := &fakeSDS200Client{}
 		session := &ScannerSession{
 			ctx:       ctx,
 			cancel:    cancel,
@@ -1417,7 +1448,7 @@ func TestScannerSessionExecuteControl(t *testing.T) {
 		require.NoError(t, err)
 
 		snap := client.snapshot()
-		require.Len(t, snap.holdCalls, 1)
+		require.Len(t, snap.keyPressCalls, 1)
 	})
 }
 
@@ -1658,21 +1689,21 @@ func TestScannerSessionSuperviseFaultInjection(t *testing.T) {
 		assertNoFatalWithin(t, session.Fatal(), 100*time.Millisecond)
 	})
 
-	t.Run("reconnect_budget_exhaustion_signals_fatal", func(t *testing.T) {
+	t.Run("persistent_failure_keeps_retrying", func(t *testing.T) {
 		hub := newStateHub()
 		initial := &fakeSDS200Client{
 			resyncStatus: sds200.RuntimeStatus{Connected: true},
 		}
 
-		factoryCalls := 0
+		var factoryCalls atomic.Int32
 		session, err := NewScannerSession(t.Context(), SessionConfig{
 			Scanner:             store.ScannerConfig{IP: "127.0.0.1"},
 			HealthCheckInterval: 5 * time.Millisecond,
 			ReconnectDelay:      time.Millisecond,
 			MaxReconnectFails:   2,
 			Factory: func(cfg sds200.ClientConfig) (SDS200Client, error) {
-				factoryCalls++
-				if factoryCalls == 1 {
+				n := factoryCalls.Add(1)
+				if n == 1 {
 					return initial, nil
 				}
 				return nil, errors.New("dial failed")
@@ -1685,27 +1716,13 @@ func TestScannerSessionSuperviseFaultInjection(t *testing.T) {
 		initial.resyncErr = errors.New("socket read failed")
 		initial.mu.Unlock()
 
-		err = requireErrorFromFatal(t, session.Fatal())
-		assert.Contains(t, err.Error(), "scanner reconnect budget exceeded")
-		assert.Contains(t, err.Error(), "dial failed")
-		assert.GreaterOrEqual(t, factoryCalls, 3)
+		require.Eventually(t, func() bool {
+			return factoryCalls.Load() > 4
+		}, time.Second, 10*time.Millisecond)
+
+		assertNoFatalWithin(t, session.Fatal(), 100*time.Millisecond)
+		assert.False(t, hub.snapshot().Scanner.Connected)
 	})
-}
-
-func requireErrorFromFatal(t *testing.T, fatal <-chan error) error {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-
-	select {
-	case <-ctx.Done():
-		require.FailNow(t, "timed out waiting for fatal error")
-		return nil
-	case err := <-fatal:
-		require.Error(t, err)
-		return err
-	}
 }
 
 func assertNoFatalWithin(t *testing.T, fatal <-chan error, duration time.Duration) {

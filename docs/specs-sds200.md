@@ -536,6 +536,8 @@ Request:   HLD,[tkw],[xxx1],[xxx2]\r
 Response:  HLD,OK\r
 ```
 
+> Implementation note: for a UI action that means "hold what is currently tuned", refresh target data with `GSI` (or equivalent resync) immediately before sending `HLD`. Relying only on cached push telemetry can target a stale channel/frequency.
+
 **AVD** -- Set Avoid Option
 
 Avoids or un-avoids targets. **Cannot avoid favorites list or site frequency.**

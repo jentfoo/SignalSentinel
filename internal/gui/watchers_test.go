@@ -4,10 +4,12 @@ package gui
 
 import (
 	"errors"
+	"image/color"
 	"testing"
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/widget"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,7 +28,7 @@ func TestApplyState(t *testing.T) {
 		assert.True(t, ui.nextButton.Disabled())
 		assert.True(t, ui.previousButton.Disabled())
 		assert.True(t, ui.avoidButton.Disabled())
-		assert.Contains(t, ui.controlStatus.Text, "scanner is disconnected")
+		assert.Contains(t, ui.controlAvailability.Text, "scanner is disconnected")
 		assert.True(t, ui.startRecButton.Disabled())
 		assert.Equal(t, "Start Recording", ui.startRecButton.Text)
 	})
@@ -45,7 +47,7 @@ func TestApplyState(t *testing.T) {
 		assert.False(t, ui.nextButton.Disabled())
 		assert.False(t, ui.previousButton.Disabled())
 		assert.False(t, ui.avoidButton.Disabled())
-		assert.Equal(t, "All visible controls available.", ui.controlStatus.Text)
+		assert.Empty(t, ui.controlAvailability.Text)
 	})
 
 	t.Run("pending_control_keeps_buttons_disabled", func(t *testing.T) {
@@ -138,15 +140,14 @@ func TestApplyState(t *testing.T) {
 		assert.False(t, ui.nextButton.Disabled())
 		assert.False(t, ui.previousButton.Disabled())
 		assert.False(t, ui.avoidButton.Disabled())
-		assert.Equal(t, "All visible controls available.", ui.controlStatus.Text)
+		assert.Empty(t, ui.controlAvailability.Text)
 		assert.False(t, ui.startRecButton.Disabled())
 		assert.Equal(t, "Start Recording", ui.startRecButton.Text)
 		assert.Equal(t, "Scanning", ui.lifecycleLabel.Text)
 		assert.Equal(t, "scan", ui.modeLabel.Text)
 		assert.Equal(t, "155.2200", ui.freqLabel.Text)
-		assert.Equal(t, "open", ui.squelchLabel.Text)
-		assert.Equal(t, "0", ui.squelchLvlLabel.Text)
-		assert.Equal(t, "unmuted", ui.muteLabel.Text)
+		assert.Equal(t, "0 (open)", ui.squelchLabel.Text)
+		assert.Equal(t, "11 (unmuted)", ui.volumeLabel.Text)
 		require.Len(t, model.activities, 1)
 		assert.Contains(t, model.activities[0], "active")
 	})
@@ -372,6 +373,45 @@ func TestApplyRecordingsLoadResult(t *testing.T) {
 	})
 }
 
+func TestConnectionMetricText(t *testing.T) {
+	model := &uiModel{}
+	at := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+
+	assert.Equal(t, "Q0 | 200ms", connectionMetricText(model, at.Add(-200*time.Millisecond), false, at))
+	assert.Equal(t, "Q0 | 200ms", connectionMetricText(model, at.Add(5*time.Second-20*time.Millisecond), false, at.Add(5*time.Second)))
+	assert.Equal(t, "Q0 | 300ms", connectionMetricText(model, at.Add(10*time.Second-300*time.Millisecond), false, at.Add(10*time.Second)))
+	assert.Equal(t, "Q1 | -", connectionMetricText(model, time.Time{}, true, at.Add(11*time.Second)))
+}
+
+func TestControlAvailabilityText(t *testing.T) {
+	assert.Empty(t, controlAvailabilityText(nil))
+	assert.Equal(t, "Blocked: Hold (scanner is disconnected)", controlAvailabilityText([]string{"Hold (scanner is disconnected)"}))
+	assert.Equal(t, "Blocked: Hold (scanner is disconnected) +2", controlAvailabilityText([]string{
+		"Hold (scanner is disconnected)",
+		"Next (scanner is disconnected)",
+		"Previous (scanner is disconnected)",
+	}))
+}
+
+func TestApplyConnectionOverview(t *testing.T) {
+	model := &uiModel{}
+	metric := widget.NewLabel("")
+	indicator := canvas.NewCircle(color.NRGBA{})
+	scanner := ScannerStatus{
+		Connected: true,
+		UpdatedAt: time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC),
+	}
+
+	applyConnectionOverview(uiViews{
+		connectionMetric:    metric,
+		connectionIndicator: indicator,
+	}, model, scanner, true, scanner.UpdatedAt.Add(500*time.Millisecond))
+
+	assert.Equal(t, "Q1 | 500ms", metric.Text)
+	gotColor := color.NRGBAModel.Convert(indicator.FillColor).(color.NRGBA)
+	assert.Equal(t, color.NRGBA{R: 46, G: 184, B: 74, A: 255}, gotColor)
+}
+
 func newTestUIViews(model *uiModel) uiViews {
 	activityList := widget.NewList(
 		func() int {
@@ -418,45 +458,44 @@ func newTestUIViews(model *uiModel) uiViews {
 	)
 
 	return uiViews{
-		connectionLabel:  widget.NewLabel(""),
-		modeLabel:        widget.NewLabel(""),
-		lifecycleLabel:   widget.NewLabel(""),
-		sourceLabel:      widget.NewLabel(""),
-		freqLabel:        widget.NewLabel(""),
-		systemLabel:      widget.NewLabel(""),
-		deptLabel:        widget.NewLabel(""),
-		channelLabel:     widget.NewLabel(""),
-		tgidLabel:        widget.NewLabel(""),
-		signalLabel:      widget.NewLabel(""),
-		squelchLabel:     widget.NewLabel(""),
-		squelchLvlLabel:  widget.NewLabel(""),
-		muteLabel:        widget.NewLabel(""),
-		volumeLabel:      widget.NewLabel(""),
-		updatedLabel:     widget.NewLabel(""),
-		holdButton:       widget.NewButton("Hold", nil),
-		nextButton:       widget.NewButton("Next", nil),
-		previousButton:   widget.NewButton("Previous", nil),
-		jumpTagButton:    widget.NewButton("Jump Tag", nil),
-		qshButton:        widget.NewButton("QSH", nil),
-		jumpScanButton:   widget.NewButton("Jump Scan", nil),
-		jumpWXButton:     widget.NewButton("Jump WX", nil),
-		avoidButton:      widget.NewButton("Avoid", nil),
-		setVolumeButton:  widget.NewButton("Set Volume", nil),
-		setSquelchButton: widget.NewButton("Set Squelch", nil),
-		commandAction:    widget.NewLabel(""),
-		commandStatus:    widget.NewLabel(""),
-		commandMessage:   widget.NewLabel(""),
-		controlStatus:    widget.NewLabel(""),
-		tagFavEntry:      widget.NewEntry(),
-		tagSysEntry:      widget.NewEntry(),
-		tagChanEntry:     widget.NewEntry(),
-		qshFreqEntry:     widget.NewEntry(),
-		startRecButton:   widget.NewButton("Start Recording", nil),
-		playButton:       widget.NewButton("Play", nil),
-		deleteButton:     widget.NewButton("Delete Selected", nil),
-		activityList:     activityList,
-		suppressedList:   suppressedList,
-		recordingsList:   recordingsList,
-		recordingsErr:    widget.NewLabel(""),
+		connectionLabel:     widget.NewLabel(""),
+		controlAvailability: widget.NewLabel(""),
+		connectionMetric:    widget.NewLabel(""),
+		connectionIndicator: canvas.NewCircle(color.NRGBA{}),
+		modeLabel:           widget.NewLabel(""),
+		lifecycleLabel:      widget.NewLabel(""),
+		sourceLabel:         widget.NewLabel(""),
+		freqLabel:           widget.NewLabel(""),
+		systemLabel:         widget.NewLabel(""),
+		deptLabel:           widget.NewLabel(""),
+		channelLabel:        widget.NewLabel(""),
+		tgidLabel:           widget.NewLabel(""),
+		signalLabel:         widget.NewLabel(""),
+		squelchLabel:        widget.NewLabel(""),
+		volumeLabel:         widget.NewLabel(""),
+		holdButton:          widget.NewButton("Hold", nil),
+		nextButton:          widget.NewButton("Next", nil),
+		previousButton:      widget.NewButton("Previous", nil),
+		jumpTagButton:       widget.NewButton("Jump Tag", nil),
+		qshButton:           widget.NewButton("QSH", nil),
+		jumpScanButton:      widget.NewButton("Jump Scan", nil),
+		jumpWXButton:        widget.NewButton("Jump WX", nil),
+		avoidButton:         widget.NewButton("Avoid", nil),
+		setVolumeButton:     widget.NewButton("Set Volume", nil),
+		setSquelchButton:    widget.NewButton("Set Squelch", nil),
+		commandAction:       widget.NewLabel(""),
+		commandStatus:       widget.NewLabel(""),
+		commandMessage:      widget.NewLabel(""),
+		tagFavEntry:         widget.NewEntry(),
+		tagSysEntry:         widget.NewEntry(),
+		tagChanEntry:        widget.NewEntry(),
+		qshFreqEntry:        widget.NewEntry(),
+		startRecButton:      widget.NewButton("Start Recording", nil),
+		playButton:          widget.NewButton("Play", nil),
+		deleteButton:        widget.NewButton("Delete Selected", nil),
+		activityList:        activityList,
+		suppressedList:      suppressedList,
+		recordingsList:      recordingsList,
+		recordingsErr:       widget.NewLabel(""),
 	}
 }

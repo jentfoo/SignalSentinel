@@ -4,6 +4,7 @@ package gui
 
 import (
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 )
@@ -13,6 +14,9 @@ type uiViews struct {
 	appTabs             *container.AppTabs
 	expertTab           *container.TabItem
 	connectionLabel     *widget.Label
+	controlAvailability *widget.Label
+	connectionIndicator *canvas.Circle
+	connectionMetric    *widget.Label
 	modeLabel           *widget.Label
 	sourceLabel         *widget.Label
 	freqLabel           *widget.Label
@@ -22,10 +26,7 @@ type uiViews struct {
 	tgidLabel           *widget.Label
 	signalLabel         *widget.Label
 	squelchLabel        *widget.Label
-	squelchLvlLabel     *widget.Label
-	muteLabel           *widget.Label
 	volumeLabel         *widget.Label
-	updatedLabel        *widget.Label
 	holdButton          *widget.Button
 	nextButton          *widget.Button
 	previousButton      *widget.Button
@@ -39,9 +40,6 @@ type uiViews struct {
 	commandAction       *widget.Label
 	commandStatus       *widget.Label
 	commandMessage      *widget.Label
-	commandRawReason    *widget.Label
-	commandRetryHint    *widget.Label
-	controlStatus       *widget.Label
 	lifecycleLabel      *widget.Label
 	tagFavEntry         *widget.Entry
 	tagSysEntry         *widget.Entry
@@ -56,7 +54,6 @@ type uiViews struct {
 	monitorOutputSelect *widget.Select
 	monitorApplyButton  *widget.Button
 	monitorStatusLabel  *widget.Label
-	monitorErrorLabel   *widget.Label
 	expertMenuStatus    *widget.Label
 	expertAnalyze       *widget.Label
 	expertWaterfall     *widget.Label

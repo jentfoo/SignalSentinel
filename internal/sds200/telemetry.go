@@ -95,10 +95,15 @@ func ParseGST(fields []string) (StatusGST, error) {
 	if err != nil {
 		return StatusGST{}, err
 	}
-	lineCount := len(base.DisplayForm)
-	idx := 1 + lineCount*2
+	// GST appears in two layouts in the field: a compact line-count variant and a
+	// fixed 20-line variant. Prefer 20-line indexing when available.
+	idx := 1 + 20*2
 	if len(fields) <= idx+11 {
-		return StatusGST{}, errors.New("insufficient gst fields")
+		lineCount := len(base.DisplayForm)
+		idx = 1 + lineCount*2
+		if len(fields) <= idx+11 {
+			return StatusGST{}, errors.New("insufficient gst fields")
+		}
 	}
 
 	status := StatusGST{StatusSTS: base}
@@ -258,9 +263,10 @@ func (s *TelemetryStore) UpdateFromGST(gst StatusGST) RuntimeStatus {
 	s.status.UpdatedAt = now
 	s.status.LastSource = cmdGST
 	s.status.Frequency = strings.TrimSpace(gst.Frequency)
-	s.status.Mute = strings.EqualFold(strings.TrimSpace(gst.Mute), "Mute") || strings.TrimSpace(gst.Mute) == "1"
-	s.status.SquelchOpen = !s.status.Mute
-	s.status.ActivityAt = now
+	if muted, ok := parseMuteValue(gst.Mute); ok {
+		s.status.Mute = muted
+		s.status.ActivityAt = now
+	}
 	return s.status
 }
 
@@ -281,14 +287,21 @@ func (s *TelemetryStore) UpdateFromScannerInfo(info ScannerInfo) RuntimeStatus {
 	if v, ok := info.Property["SQL"]; ok {
 		s.status.Squelch = parseIntDefault(v, s.status.Squelch)
 	}
+	signalUpdated := false
 	if v, ok := info.Property["Sig"]; ok {
 		s.status.Signal = parseIntDefault(v, s.status.Signal)
 		s.status.ActivityAt = now
+		signalUpdated = true
 	}
 	if v, ok := info.Property["Mute"]; ok {
-		s.status.Mute = strings.EqualFold(v, "Mute")
-		s.status.SquelchOpen = !s.status.Mute
-		s.status.ActivityAt = now
+		if muted, known := parseMuteValue(v); known {
+			s.status.Mute = muted
+			s.status.ActivityAt = now
+		}
+	}
+	if signalUpdated {
+		// PSI "Sig" comes directly from scanner RF status and is more stable for squelch state.
+		s.status.SquelchOpen = s.status.Signal > 0
 	}
 	if v, ok := info.Property["P25Status"]; ok {
 		s.status.P25Status = strings.TrimSpace(v)
@@ -315,6 +328,42 @@ func (s *TelemetryStore) UpdateFromScannerInfo(info ScannerInfo) RuntimeStatus {
 		}
 		s.status.System = extractName(info.Nodes["System"])
 		s.status.Department = extractName(info.Nodes["Department"])
+	} else if nodes := info.Nodes["SrchFrequency"]; len(nodes) > 0 {
+		srch := nodes[0]
+		s.status.System = ""
+		s.status.Department = ""
+		s.status.Channel = ""
+		s.status.Talkgroup = strings.TrimSpace(srch["TGID"])
+		if freq := strings.TrimSpace(srch["Freq"]); freq != "" {
+			s.status.Frequency = freq
+		}
+	} else if nodes := info.Nodes["CcHitsChannel"]; len(nodes) > 0 {
+		cc := nodes[0]
+		s.status.System = ""
+		s.status.Department = ""
+		s.status.Channel = strings.TrimSpace(cc["Name"])
+		s.status.Talkgroup = strings.TrimSpace(cc["TGID"])
+		if freq := strings.TrimSpace(cc["Freq"]); freq != "" {
+			s.status.Frequency = freq
+		}
+	} else if nodes := info.Nodes["WxChannel"]; len(nodes) > 0 {
+		wx := nodes[0]
+		s.status.System = ""
+		s.status.Department = ""
+		s.status.Channel = strings.TrimSpace(wx["Name"])
+		s.status.Talkgroup = ""
+		if freq := strings.TrimSpace(wx["Freq"]); freq != "" {
+			s.status.Frequency = freq
+		}
+	} else if nodes := info.Nodes["ToneOutChannel"]; len(nodes) > 0 {
+		fto := nodes[0]
+		s.status.System = ""
+		s.status.Department = ""
+		s.status.Channel = strings.TrimSpace(fto["Name"])
+		s.status.Talkgroup = ""
+		if freq := strings.TrimSpace(fto["Freq"]); freq != "" {
+			s.status.Frequency = freq
+		}
 	}
 
 	return s.status
@@ -342,6 +391,17 @@ func deriveAvoidState(info ScannerInfo) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+func parseMuteValue(value string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "mute", "1":
+		return true, true
+	case "unmute", "0":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func parseAvoidValue(value string) (bool, bool) {

@@ -551,7 +551,7 @@ func mapGUIControlRequest(request gui.ControlRequest) (ControlIntent, ControlPar
 	case gui.IntentQuickSearchHold:
 		return IntentQuickSearchHold, ControlParams{
 			FrequencyHz: request.FrequencyHz,
-		}, "Quick Search Hold", nil
+		}, "Set Freq", nil
 	case gui.IntentJumpMode:
 		return IntentJumpMode, ControlParams{
 			JumpMode:  request.JumpMode,

@@ -101,6 +101,23 @@ func TestParseGST(t *testing.T) {
 		_, err := ParseGST(fields)
 		require.Error(t, err)
 	})
+
+	t.Run("parses_fixed_twenty_line_layout", func(t *testing.T) {
+		fields := []string{"00000"}
+		for i := 1; i <= 20; i++ {
+			fields = append(fields, "line", "mode")
+		}
+		fields = append(fields,
+			"Mute", "1", "0",
+			"1", "460.1000", "NFM", "0",
+			"460.1000", "459.0000", "461.0000", "0", "3",
+		)
+
+		got, err := ParseGST(fields)
+		require.NoError(t, err)
+		assert.Equal(t, "Mute", got.Mute)
+		assert.Equal(t, "460.1000", got.Frequency)
+	})
 }
 
 func TestParseScannerInfoXML(t *testing.T) {
@@ -188,6 +205,25 @@ func TestTelemetryStoreUpdateFromGST(t *testing.T) {
 		assert.False(t, updated.SquelchOpen)
 		assert.False(t, updated.ActivityAt.IsZero())
 	})
+
+	t.Run("ignores_unknown_mute_token", func(t *testing.T) {
+		store := NewTelemetryStore()
+		_ = store.UpdateFromScannerInfo(ScannerInfo{
+			Property: map[string]string{
+				"Sig":  "3",
+				"Mute": "Unmute",
+			},
+		})
+
+		updated := store.UpdateFromGST(StatusGST{
+			StatusSTS: StatusSTS{DisplayForm: "00000"},
+			Mute:      "m1",
+			Frequency: "851.0125",
+		})
+
+		assert.False(t, updated.Mute)
+		assert.True(t, updated.SquelchOpen)
+	})
 }
 
 func TestTelemetryStoreUpdateFromScannerInfo(t *testing.T) {
@@ -262,6 +298,37 @@ func TestTelemetryStoreUpdateFromScannerInfo(t *testing.T) {
 		assert.True(t, updated.Avoided)
 	})
 
+	t.Run("sig_drives_squelch_open", func(t *testing.T) {
+		store := NewTelemetryStore()
+		updated := store.UpdateFromScannerInfo(ScannerInfo{
+			Property: map[string]string{
+				"Sig":  "2",
+				"Mute": "Mute",
+			},
+		})
+
+		assert.True(t, updated.Mute)
+		assert.True(t, updated.SquelchOpen)
+	})
+
+	t.Run("ignores_unknown_mute_value", func(t *testing.T) {
+		store := NewTelemetryStore()
+		_ = store.UpdateFromScannerInfo(ScannerInfo{
+			Property: map[string]string{
+				"Mute": "Mute",
+			},
+		})
+
+		updated := store.UpdateFromScannerInfo(ScannerInfo{
+			Property: map[string]string{
+				"Mute": "unknown",
+			},
+		})
+
+		assert.True(t, updated.Mute)
+		assert.False(t, updated.SquelchOpen)
+	})
+
 	t.Run("uses_department_system_fallback", func(t *testing.T) {
 		store := NewTelemetryStore()
 		info := ScannerInfo{
@@ -316,6 +383,39 @@ func TestTelemetryStoreUpdateFromScannerInfo(t *testing.T) {
 		updated := store.UpdateFromScannerInfo(info)
 		assert.False(t, updated.Hold)
 		assert.False(t, updated.SquelchOpen)
+	})
+
+	t.Run("search_frequency_updates_runtime_and_clears_stale_labels", func(t *testing.T) {
+		store := NewTelemetryStore()
+		_ = store.UpdateFromScannerInfo(ScannerInfo{
+			Mode:    "Scan Mode",
+			VScreen: "conventional_scan",
+			Property: map[string]string{
+				"Mute": "Unmute",
+			},
+			Nodes: map[string][]map[string]string{
+				"System":        {{"Name": "County"}},
+				"Department":    {{"Name": "Fire"}},
+				"ConvFrequency": {{"Name": "Fire Ops", "Freq": "155.2200", "Hold": "On"}},
+			},
+		})
+
+		updated := store.UpdateFromScannerInfo(ScannerInfo{
+			Mode:    "Quick Search Hold",
+			VScreen: "quick_search",
+			Property: map[string]string{
+				"Mute": "Unmute",
+			},
+			Nodes: map[string][]map[string]string{
+				"SrchFrequency": {{"Freq": "4060000", "Hold": "On"}},
+			},
+		})
+
+		assert.Equal(t, "4060000", updated.Frequency)
+		assert.Empty(t, updated.System)
+		assert.Empty(t, updated.Department)
+		assert.Empty(t, updated.Channel)
+		assert.Empty(t, updated.Talkgroup)
 	})
 }
 

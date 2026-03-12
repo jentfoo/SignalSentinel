@@ -475,6 +475,11 @@ func TestIsTransmissionActive(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "squelch_open_muted_inactive",
+			status: RuntimeStatus{Connected: true, SquelchOpen: true, Signal: 3, Mute: true},
+			want:   false,
+		},
+		{
 			name:   "signal_without_mute_active",
 			status: RuntimeStatus{Connected: true, Signal: 3, Mute: false},
 			want:   true,

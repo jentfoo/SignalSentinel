@@ -205,10 +205,10 @@ func IsTransmissionActive(status RuntimeStatus) bool {
 	if strings.EqualFold(strings.TrimSpace(status.P25Status), "Data") {
 		return false
 	}
-	if status.SquelchOpen {
-		return true
+	if status.Mute {
+		return false
 	}
-	return status.Signal > 0 && !status.Mute
+	return status.SquelchOpen || status.Signal > 0
 }
 
 func isActivityTelemetryStale(status RuntimeStatus) bool {
